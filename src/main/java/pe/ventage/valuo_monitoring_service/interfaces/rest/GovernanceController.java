@@ -146,4 +146,56 @@ public class GovernanceController {
         ModelBenchmarkResult result = queryService.handle(query);
         return ResponseEntity.ok(ModelBenchmarkResourceAssembler.toResource(result));
     }
+
+    @GetMapping("/ipc")
+    @Operation(summary = "Consultar factor IPC vigente", description = "Retorna el factor IPC macroeconómico activo en memoria RAM para venta y alquiler.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Configuración IPC obtenida"),
+            @ApiResponse(responseCode = "503", description = "Servicio ML no disponible")
+    })
+    public ResponseEntity<java.util.Map<String, Object>> getIpcConfig() {
+        return ResponseEntity.ok(queryService.getIpcConfig());
+    }
+
+    @PutMapping("/ipc")
+    @Operation(summary = "Actualizar factor IPC en caliente", description = "Actualiza el factor macroeconómico en memoria RAM sin downtime y persiste en bitácora.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Factor IPC actualizado exitosamente"),
+            @ApiResponse(responseCode = "400", description = "Parámetros inválidos"),
+            @ApiResponse(responseCode = "500", description = "Error al actualizar en el servicio ML")
+    })
+    public ResponseEntity<java.util.Map<String, Object>> updateIpcConfig(
+            @Valid @RequestBody pe.ventage.valuo_monitoring_service.interfaces.rest.resources.UpdateIpcResource resource
+    ) {
+        String actor = resource.actualizadoPor() != null && !resource.actualizadoPor().isBlank()
+                ? resource.actualizadoPor()
+                : MOCK_ADMIN_EMAIL;
+        java.util.Map<String, Object> response = commandService.updateIpcConfig(
+                resource.valor(),
+                resource.periodo(),
+                resource.fuente(),
+                actor,
+                resource.nota(),
+                resource.aplicarA()
+        );
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/models/history")
+    @Operation(summary = "Historial de versiones en MLflow", description = "Lista todas las versiones de modelos registradas en MLflow Model Registry para venta o alquiler.")
+    public ResponseEntity<java.util.Map<String, Object>> getModelHistory(
+            @RequestParam(defaultValue = "VENTA") String operationType
+    ) {
+        return ResponseEntity.ok(queryService.getModelHistory(OperationType.fromString(operationType)));
+    }
+
+    @GetMapping("/training/availability")
+    @Operation(summary = "Consultar disponibilidad para nuevo entrenamiento", description = "Verifica si el servicio ML y la base de datos se encuentran libres o si hay un job en curso.")
+    public ResponseEntity<java.util.Map<String, Object>> getTrainingAvailability() {
+        boolean available = queryService.isTrainingAvailable();
+        return ResponseEntity.ok(java.util.Map.of(
+                "disponible_para_entrenar", available,
+                "mensaje", available ? "Servicio disponible para iniciar un nuevo entrenamiento" : "Servicio ocupado ejecutando otro entrenamiento"
+        ));
+    }
 }

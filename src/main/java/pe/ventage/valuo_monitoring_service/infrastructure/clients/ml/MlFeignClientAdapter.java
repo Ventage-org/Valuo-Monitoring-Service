@@ -428,4 +428,85 @@ public class MlFeignClientAdapter implements ExternalMlService {
         Object val = map.get(key);
         return val instanceof Boolean b ? b : defaultVal;
     }
+
+    @Override
+    public boolean isTrainingAvailable() {
+        try {
+            Map<String, Object> status = feignClient.getLatestJobStatus();
+            if (status == null) return true;
+            Object disponible = status.get("disponible_para_entrenar");
+            if (disponible instanceof Boolean b) {
+                return b;
+            }
+            Object ultimoJob = status.get("ultimo_job");
+            if (ultimoJob instanceof Map<?, ?> jobMap) {
+                String estado = (String) jobMap.get("estado");
+                if ("en_progreso".equalsIgnoreCase(estado) || "in_progress".equalsIgnoreCase(estado)) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            log.warn("Failed to check ML service training availability: {}", e.getMessage());
+            return true;
+        }
+    }
+
+    @Override
+    public Map<String, Object> getIpcConfig() {
+        try {
+            return feignClient.getIpcConfig();
+        } catch (Exception e) {
+            log.error("Failed to get IPC config from ML service: {}", e.getMessage());
+            throw new MlServiceException(503, "No se pudo obtener la configuración IPC desde el servicio ML: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Map<String, Object> updateIpcConfig(Double valor, String periodo, String fuente, String actualizadoPor, String nota, String aplicarA) {
+        try {
+            FastApiUpdateIpcRequest req = new FastApiUpdateIpcRequest(
+                    valor,
+                    periodo,
+                    fuente,
+                    actualizadoPor,
+                    nota,
+                    aplicarA != null ? aplicarA : "ambos"
+            );
+            return feignClient.updateIpcConfig(req);
+        } catch (Exception e) {
+            log.error("Failed to update IPC config in ML service: {}", e.getMessage());
+            throw new MlServiceException(500, "Error al actualizar factor IPC en el servicio ML: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Map<String, Object> getSystemResources() {
+        try {
+            return feignClient.getRecursos();
+        } catch (Exception e) {
+            log.error("Failed to get system resources from ML service: {}", e.getMessage());
+            throw new MlServiceException(503, "No se pudo obtener la telemetría de recursos desde el servicio ML: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Map<String, Object> getLatencyMetrics(String operationType) {
+        try {
+            return feignClient.getLatenciaP95(operationType.toLowerCase());
+        } catch (Exception e) {
+            log.error("Failed to get latency metrics from ML service: {}", e.getMessage());
+            throw new MlServiceException(503, "No se pudo obtener las métricas de latencia desde el servicio ML: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Map<String, Object> getModelHistory(String operationType) {
+        try {
+            return feignClient.getModelHistory(operationType.toLowerCase());
+        } catch (Exception e) {
+            log.error("Failed to get model history from ML service: {}", e.getMessage());
+            throw new MlServiceException(503, "No se pudo obtener el historial de modelos desde el servicio ML: " + e.getMessage());
+        }
+    }
 }

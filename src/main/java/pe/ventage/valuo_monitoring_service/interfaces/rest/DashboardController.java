@@ -70,4 +70,18 @@ public class DashboardController {
         ConceptDriftResult result = dashboardQueryService.handle(query);
         return ResponseEntity.ok(DashboardResourceAssembler.toResource(result));
     }
+
+    @GetMapping("/resources")
+    @Operation(summary = "Telemetría de recursos del contenedor ML", description = "Retorna telemetría en tiempo real: CPU %, memoria RAM usada y total (MB), disco y tiempo de actividad (uptime).")
+    public ResponseEntity<java.util.Map<String, Object>> getResources() {
+        return ResponseEntity.ok(dashboardQueryService.getSystemResources());
+    }
+
+    @GetMapping("/latency")
+    @Operation(summary = "Latencia P95 y Hash de Artefactos", description = "Retorna latencia P50, P95, P99 en ms, umbral SLA (100ms) y verificación de integridad sha256 del modelo en producción.")
+    public ResponseEntity<java.util.Map<String, Object>> getLatency(
+            @RequestParam(defaultValue = "VENTA") String operationType
+    ) {
+        return ResponseEntity.ok(dashboardQueryService.getLatencyMetrics(OperationType.fromString(operationType)));
+    }
 }

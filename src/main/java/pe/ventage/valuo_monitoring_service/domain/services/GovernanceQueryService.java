@@ -13,4 +13,7 @@ public interface GovernanceQueryService {
     Optional<ModelTrainingJob> handle(GetJobStatusQuery query);
     Page<ModelTrainingJob> handle(GetTrainingHistoryQuery query);
     ModelBenchmarkResult handle(GetModelBenchmarkQuery query);
+    java.util.Map<String, Object> getIpcConfig();
+    java.util.Map<String, Object> getModelHistory(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType);
+    boolean isTrainingAvailable();
 }

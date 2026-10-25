@@ -154,4 +154,14 @@ public class DashboardQueryServiceImpl implements DashboardQueryService {
             return List.of();
         }
     }
+
+    @Override
+    public java.util.Map<String, Object> getSystemResources() {
+        return externalMlService.getSystemResources();
+    }
+
+    @Override
+    public java.util.Map<String, Object> getLatencyMetrics(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType) {
+        return externalMlService.getLatencyMetrics(operationType.name().toLowerCase());
+    }
 }

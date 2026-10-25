@@ -19,6 +19,8 @@ import pe.ventage.valuo_monitoring_service.domain.services.GovernanceCommandServ
 import pe.ventage.valuo_monitoring_service.infrastructure.persistence.jpa.repositories.ModelTrainingJobRepository;
 import pe.ventage.valuo_monitoring_service.infrastructure.persistence.jpa.repositories.ModelTransitionLogRepository;
 
+import java.util.List;
+
 @Service
 @Slf4j
 public class GovernanceCommandServiceImpl implements GovernanceCommandService {
@@ -40,6 +42,20 @@ public class GovernanceCommandServiceImpl implements GovernanceCommandService {
     @Transactional
     public ModelTrainingJob handle(TriggerTrainingCommand command) {
         log.info("Processing TriggerTrainingCommand for operationType={}", command.operationType());
+
+        // Regla de Negocio: No permitir dos entrenamientos simultáneos (verificación local y remota)
+        List<ModelTrainingJob> activeJobs = jobRepository.findByStatusIn(List.of(JobStatus.PENDING, JobStatus.RUNNING));
+        if (!activeJobs.isEmpty()) {
+            throw new pe.ventage.valuo_monitoring_service.domain.model.exceptions.TrainingConflictException(
+                    "Ya existe un entrenamiento en curso (Job ID: " + activeJobs.get(0).getJobId() + "). Solo se permite un job simultáneo."
+            );
+        }
+
+        if (!externalMlService.isTrainingAvailable()) {
+            throw new pe.ventage.valuo_monitoring_service.domain.model.exceptions.TrainingConflictException(
+                    "El servicio ML se encuentra ocupado ejecutando otro entrenamiento en este momento. Solo se permite un job simultáneo."
+            );
+        }
 
         // Always false by governance policy (requires explicit promotion step)
         MlTriggerTrainingParams params = new MlTriggerTrainingParams(
@@ -211,5 +227,11 @@ public class GovernanceCommandServiceImpl implements GovernanceCommandService {
         });
 
         return jobRepository.save(job);
+    }
+
+    @Override
+    public java.util.Map<String, Object> updateIpcConfig(Double valor, String periodo, String fuente, String actualizadoPor, String nota, String aplicarA) {
+        log.info("Updating IPC factor to {} ({}) applied to {}", valor, periodo, aplicarA);
+        return externalMlService.updateIpcConfig(valor, periodo, fuente, actualizadoPor, nota, aplicarA);
     }
 }

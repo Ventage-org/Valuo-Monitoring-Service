@@ -40,6 +40,16 @@ public class GlobalExceptionHandler {
         return problem;
     }
 
+    @ExceptionHandler(pe.ventage.valuo_monitoring_service.domain.model.exceptions.TrainingConflictException.class)
+    public ProblemDetail handleTrainingConflict(pe.ventage.valuo_monitoring_service.domain.model.exceptions.TrainingConflictException ex) {
+        log.warn("Training conflict: {}", ex.getMessage());
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        problem.setTitle("Training Conflict");
+        problem.setType(URI.create("https://valuo.pe/errors/training-conflict"));
+        problem.setProperty("timestamp", Instant.now());
+        return problem;
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
         Map<String, String> fieldErrors = new HashMap<>();

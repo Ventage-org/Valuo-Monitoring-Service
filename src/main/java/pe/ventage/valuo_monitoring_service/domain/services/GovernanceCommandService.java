@@ -12,4 +12,5 @@ public interface GovernanceCommandService {
     ModelTransitionLog handle(PromoteModelCommand command);
     ModelTransitionLog handle(RollbackModelCommand command);
     ModelTrainingJob handle(SyncJobStatusCommand command);
+    java.util.Map<String, Object> updateIpcConfig(Double valor, String periodo, String fuente, String actualizadoPor, String nota, String aplicarA);
 }

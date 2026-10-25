@@ -148,6 +148,31 @@ Para respetar los estándares de inmutabilidad en auditoría:
   }
   ```
   *(Parámetros `max_depth` y `learning_rate` opcionales; si no se envían, FastAPI usa valores predeterminados).*
+- **Regla de Concurrencia (Semáforo):** Si ya existe un job en curso (local o en `ml-service`), responde de inmediato **HTTP 409 Conflict** impidiendo ejecuciones simultáneas.
+
+### 3.5. Gestión Dinámica del Factor IPC (Zero Downtime)
+- **Consultar Factor Vigente:** `GET /api/v1/governance/ipc`
+  - Retorna factor en RAM para Venta y Alquiler (ej. `169.50`, período `2026-Q2`, base Dic-2009=100).
+- **Actualizar Factor en Caliente:** `PUT /api/v1/governance/ipc`
+  - **Request Body:**
+    ```json
+    {
+      "valor": 169.50,
+      "periodo": "2026-Q2",
+      "fuente": "INEI/BCRP — serie PN01270PM, Base Dic 2009 = 100",
+      "actualizado_por": "Joaquín Cortez",
+      "nota": "Ajuste trimestral por publicación oficial del BCRP para 2026-Q2",
+      "aplicar_a": "ambos"
+    }
+    ```
+
+### 3.6. Telemetría de Recursos y Latencia del Servicio ML
+- **Recursos del Contenedor:** `GET /api/v1/dashboard/resources`
+  - Retorna uso de CPU %, memoria RAM usada y total en MB, uptime y threads activos.
+- **Latencia P95 e Integridad:** `GET /api/v1/dashboard/latency?operationType=VENTA`
+  - Retorna percentiles de latencia (P50, P95, P99 ms), cumplimiento de SLA (100 ms) y hash SHA-256 del modelo en producción.
+- **Disponibilidad de Entrenamiento:** `GET /api/v1/governance/training/availability`
+  - Permite al frontend saber si el botón de reentrenamiento debe estar habilitado o deshabilitado en tiempo real.
 
 ---
 

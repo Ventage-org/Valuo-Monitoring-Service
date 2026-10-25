@@ -63,4 +63,11 @@ public interface MlFeignClient {
 
     @GetMapping("/health")
     Map<String, Object> getHealth();
+
+    // 4. Configuración Macroeconómica (IPC)
+    @GetMapping("/api/v1/admin/config/ipc")
+    Map<String, Object> getIpcConfig();
+
+    @PutMapping("/api/v1/admin/config/ipc")
+    Map<String, Object> updateIpcConfig(@RequestBody FastApiUpdateIpcRequest request);
 }

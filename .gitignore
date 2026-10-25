@@ -5,6 +5,8 @@ target/
 !**/src/test/**/target/
 .agent/
 MONITORING_BACKEND_SPECIFICATION.md
+.env
+.env.local
 
 ### STS ###
 .apt_generated

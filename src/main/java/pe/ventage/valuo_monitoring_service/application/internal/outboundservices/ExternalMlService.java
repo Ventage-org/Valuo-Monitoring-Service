@@ -17,6 +17,12 @@ public interface ExternalMlService {
     MlConceptDriftDetailResponse getConceptDrift(String operationType, String temporalRange);
     Optional<MlActiveModelInfo> getActiveModel(String operationType);
     ModelBenchmarkResult getBenchmark(String operationType, boolean soloUltimo);
+    boolean isTrainingAvailable();
+    java.util.Map<String, Object> getIpcConfig();
+    java.util.Map<String, Object> updateIpcConfig(Double valor, String periodo, String fuente, String actualizadoPor, String nota, String aplicarA);
+    java.util.Map<String, Object> getSystemResources();
+    java.util.Map<String, Object> getLatencyMetrics(String operationType);
+    java.util.Map<String, Object> getModelHistory(String operationType);
 
     record MlTriggerTrainingParams(String operationType, String datasetVersion, String targetMetric, boolean guardarComoActivo, Integer maxDepth, Double learningRate) {}
     record MlJobTriggerResponse(String jobId, String status, String message) {}

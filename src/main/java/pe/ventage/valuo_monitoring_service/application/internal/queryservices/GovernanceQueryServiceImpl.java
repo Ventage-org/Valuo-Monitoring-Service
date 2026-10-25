@@ -78,4 +78,19 @@ public class GovernanceQueryServiceImpl implements GovernanceQueryService {
                 query.soloUltimo()
         );
     }
+
+    @Override
+    public java.util.Map<String, Object> getIpcConfig() {
+        return externalMlService.getIpcConfig();
+    }
+
+    @Override
+    public java.util.Map<String, Object> getModelHistory(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType) {
+        return externalMlService.getModelHistory(operationType.name().toLowerCase());
+    }
+
+    @Override
+    public boolean isTrainingAvailable() {
+        return externalMlService.isTrainingAvailable();
+    }
 }
