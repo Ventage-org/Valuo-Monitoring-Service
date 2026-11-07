@@ -27,8 +27,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                 modelName,
                 params.guardarComoActivo(),
                 params.maxDepth(),
-                params.learningRate()
-        );
+                params.learningRate());
 
         FastApiTrainingTriggerResponse res;
         if ("alquiler".equalsIgnoreCase(tipo)) {
@@ -44,7 +43,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
     public Optional<MlJobStatusResponse> getJobStatus(String jobId) {
         try {
             FastApiJobStatusResponse res = feignClient.getJobStatus(jobId);
-            if (res == null) return Optional.empty();
+            if (res == null)
+                return Optional.empty();
 
             String normalizedStatus = "PENDING";
             if ("en_progreso".equalsIgnoreCase(res.estado())) {
@@ -58,7 +58,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
             Double r2 = extractDouble(res.metricas(), "r2");
             Double mae = extractDouble(res.metricas(), "mae");
             Double mape = extractDouble(res.metricas(), "mape_pct");
-            if (mape == null) mape = extractDouble(res.metricas(), "mape");
+            if (mape == null)
+                mape = extractDouble(res.metricas(), "mape");
 
             String modelVersion = res.mlflowModelVersion() != null
                     ? res.mlflowModelVersion()
@@ -71,10 +72,10 @@ public class MlFeignClientAdapter implements ExternalMlService {
                     r2,
                     mae,
                     mape,
-                    res.error()
-            ));
+                    res.error()));
         } catch (MlServiceException e) {
-            if (e.getStatus() == 404) return Optional.empty();
+            if (e.getStatus() == 404)
+                return Optional.empty();
             throw e;
         }
     }
@@ -84,10 +85,10 @@ public class MlFeignClientAdapter implements ExternalMlService {
         FastApiPromoteRequest req = new FastApiPromoteRequest(
                 params.operationType().toLowerCase(),
                 params.modelVersion(),
-                params.reason()
-        );
+                params.reason());
         FastApiActionResponse res = feignClient.promoteModel(req);
-        boolean success = Boolean.TRUE.equals(res.exito()) || res.versionPromovida() != null || "Production".equalsIgnoreCase(res.nuevoStage());
+        boolean success = Boolean.TRUE.equals(res.exito()) || res.versionPromovida() != null
+                || "Production".equalsIgnoreCase(res.nuevoStage());
 
         Map<String, Object> deltas = res.deltas();
         Double deltaMape = deltas != null ? extractDouble(deltas, "delta_mape_pct") : null;
@@ -108,8 +109,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                 deltaR2,
                 deltaMae,
                 deltaRmse,
-                mejoraMape
-        );
+                mejoraMape);
     }
 
     @Override
@@ -117,10 +117,10 @@ public class MlFeignClientAdapter implements ExternalMlService {
         FastApiRollbackRequest req = new FastApiRollbackRequest(
                 params.operationType().toLowerCase(),
                 params.targetVersion(),
-                params.reason()
-        );
+                params.reason());
         FastApiActionResponse res = feignClient.rollbackModel(req);
-        boolean success = Boolean.TRUE.equals(res.exito()) || res.versionPromovida() != null || "Production".equalsIgnoreCase(res.nuevoStage());
+        boolean success = Boolean.TRUE.equals(res.exito()) || res.versionPromovida() != null
+                || "Production".equalsIgnoreCase(res.nuevoStage());
 
         Map<String, Object> deltas = res.deltas();
         Double deltaMape = deltas != null ? extractDouble(deltas, "delta_mape_pct") : null;
@@ -140,8 +140,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                 deltaR2,
                 deltaMae,
                 deltaRmse,
-                mejoraMape
-        );
+                mejoraMape);
     }
 
     @Override
@@ -149,19 +148,22 @@ public class MlFeignClientAdapter implements ExternalMlService {
         FastApiDiscardRequest req = new FastApiDiscardRequest(
                 params.operationType().toLowerCase(),
                 params.version(),
-                params.reason()
-        );
+                params.reason());
         FastApiDiscardResponse res = feignClient.discardModel(req);
-        boolean success = res != null && (Boolean.TRUE.equals(res.exito()) || "Archived".equalsIgnoreCase(res.nuevoStage()));
+        boolean success = res != null
+                && (Boolean.TRUE.equals(res.exito()) || "Archived".equalsIgnoreCase(res.nuevoStage()));
 
         Map<String, Object> metrics = res != null ? res.metricas() : Collections.emptyMap();
         Double mape = metrics != null ? extractDouble(metrics, "mape_pct") : null;
-        if (mape == null && metrics != null) mape = extractDouble(metrics, "mape");
+        if (mape == null && metrics != null)
+            mape = extractDouble(metrics, "mape");
         Double r2 = metrics != null ? extractDouble(metrics, "r2") : null;
         Double mae = metrics != null ? extractDouble(metrics, "mae") : null;
-        if (mae == null && metrics != null) mae = extractDouble(metrics, "mae_soles");
+        if (mae == null && metrics != null)
+            mae = extractDouble(metrics, "mae_soles");
         Double rmse = metrics != null ? extractDouble(metrics, "rmse") : null;
-        if (rmse == null && metrics != null) rmse = extractDouble(metrics, "rmse_soles");
+        if (rmse == null && metrics != null)
+            rmse = extractDouble(metrics, "rmse_soles");
 
         String msg = res != null && res.mensaje() != null
                 ? res.mensaje()
@@ -176,8 +178,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                 r2,
                 mae,
                 rmse,
-                res != null ? res.descartadoEn() : null
-        );
+                res != null ? res.descartadoEn() : null);
     }
 
     @Override
@@ -186,13 +187,16 @@ public class MlFeignClientAdapter implements ExternalMlService {
         try {
             Map<String, Object> map = feignClient.getModelInfo(operationType.toLowerCase());
             Map<String, Object> metrics = map.get("metricas") instanceof Map<?, ?> m
-                    ? (Map<String, Object>) m : Map.of();
+                    ? (Map<String, Object>) m
+                    : Map.of();
 
             Double r2 = extractDouble(metrics, "r2");
             Double mae = extractDouble(metrics, "mae_soles");
-            if (mae == null) mae = extractDouble(metrics, "mae");
+            if (mae == null)
+                mae = extractDouble(metrics, "mae");
             Double mape = extractDouble(metrics, "mape_pct");
-            if (mape == null) mape = extractDouble(metrics, "mape");
+            if (mape == null)
+                mape = extractDouble(metrics, "mape");
 
             String version = extractString(map, "version", "v1.0.0");
             String status = (r2 != null && r2 >= 0.70 && mape != null && mape <= 15.0) ? "HEALTHY" : "DEGRADED";
@@ -203,8 +207,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                     r2,
                     mae,
                     mape,
-                    status
-            );
+                    status);
         } catch (Exception e) {
             log.warn("Failed to get model info from ML service: {}", e.getMessage());
             return new MlHealthMetricsResponse(operationType, "unknown", 0.0, 0.0, 0.0, "UNKNOWN");
@@ -221,7 +224,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
             Double overallPsi = extractDouble(map, "overall_psi");
 
             List<Map<String, Object>> features = map.get("features") instanceof List<?> list
-                    ? (List<Map<String, Object>>) list : List.of();
+                    ? (List<Map<String, Object>>) list
+                    : List.of();
 
             int totalFeatures = features.size();
             int driftedFeatures = 0;
@@ -242,8 +246,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                     driftedFeatures,
                     totalFeatures,
                     null,
-                    overallPsi
-            );
+                    overallPsi);
         } catch (Exception e) {
             log.warn("Failed to get drift status from ML service: {}", e.getMessage());
             return new MlDriftStatusResponse(operationType, false, false, 0.0, 0, 0, 0.0, 0.0);
@@ -260,21 +263,22 @@ public class MlFeignClientAdapter implements ExternalMlService {
 
             List<FeatureDriftSummary> metrics = new ArrayList<>();
             List<Map<String, Object>> features = map.get("features") instanceof List<?> list
-                    ? (List<Map<String, Object>>) list : List.of();
+                    ? (List<Map<String, Object>>) list
+                    : List.of();
 
             int driftedFeatures = 0;
             for (Map<String, Object> f : features) {
                 String st = (String) f.get("status");
                 boolean isDrifted = "MODERATE_DRIFT".equalsIgnoreCase(st) || "SIGNIFICANT_DRIFT".equalsIgnoreCase(st);
-                if (isDrifted) driftedFeatures++;
+                if (isDrifted)
+                    driftedFeatures++;
 
                 metrics.add(new FeatureDriftSummary(
                         (String) f.get("feature_name"),
                         toDouble(f.get("psi_score")),
                         0.10,
                         isDrifted,
-                        "PSI"
-                ));
+                        "PSI"));
             }
 
             Double share = !features.isEmpty() ? (double) driftedFeatures / features.size() : 0.0;
@@ -286,8 +290,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                     share,
                     driftedFeatures,
                     features.size(),
-                    metrics
-            );
+                    metrics);
         } catch (Exception e) {
             log.warn("Failed to get data drift from ML service: {}", e.getMessage());
             return new MlDataDriftDetailResponse(operationType, temporalRange, false, 0.0, 0, 0, List.of());
@@ -308,11 +311,11 @@ public class MlFeignClientAdapter implements ExternalMlService {
                     null,
                     overallPsi,
                     null,
-                    interp
-            );
+                    interp);
         } catch (Exception e) {
             log.warn("Failed to get concept drift / fluctuacion temporal from ML service: {}", e.getMessage());
-            return new MlConceptDriftDetailResponse(operationType, temporalRange, false, 0.0, 0.0, null, "Sin datos remotos");
+            return new MlConceptDriftDetailResponse(operationType, temporalRange, false, 0.0, 0.0, null,
+                    "Sin datos remotos");
         }
     }
 
@@ -320,13 +323,13 @@ public class MlFeignClientAdapter implements ExternalMlService {
     public Optional<MlActiveModelInfo> getActiveModel(String operationType) {
         try {
             Map<String, Object> map = feignClient.getModelInfo(operationType.toLowerCase());
-            if (map == null || map.isEmpty()) return Optional.empty();
+            if (map == null || map.isEmpty())
+                return Optional.empty();
 
             return Optional.of(new MlActiveModelInfo(
                     extractString(map, "version", "unknown"),
                     "PRODUCTION",
-                    operationType
-            ));
+                    operationType));
         } catch (Exception e) {
             log.warn("Failed to get active model from ML service: {}", e.getMessage());
             return Optional.empty();
@@ -339,10 +342,12 @@ public class MlFeignClientAdapter implements ExternalMlService {
         try {
             Map<String, Object> map = feignClient.getBenchmark(operationType.toLowerCase(), soloUltimo);
             Double benchmarkRefMape = extractDouble(map, "benchmark_referencial_mape");
-            if (benchmarkRefMape == null) benchmarkRefMape = 15.0;
+            if (benchmarkRefMape == null)
+                benchmarkRefMape = 15.0;
 
             Map<String, Object> prodMap = map.get("modelo_produccion") instanceof Map<?, ?> m
-                    ? (Map<String, Object>) m : Map.of();
+                    ? (Map<String, Object>) m
+                    : Map.of();
             ProductionModelSummary prodSummary = parseProductionSummary(prodMap);
 
             List<CandidateBenchmarkSummary> candidates = new ArrayList<>();
@@ -364,18 +369,20 @@ public class MlFeignClientAdapter implements ExternalMlService {
                     prodSummary,
                     candidates,
                     totalCandidatos,
-                    generadoEn
-            );
+                    generadoEn);
         } catch (Exception e) {
             log.error("Failed to get benchmark from ML service: {}", e.getMessage(), e);
-            throw new MlServiceException(503, "No se pudo obtener el benchmark de modelos desde el servicio ML: " + e.getMessage());
+            throw new MlServiceException(503,
+                    "No se pudo obtener el benchmark de modelos desde el servicio ML: " + e.getMessage());
         }
     }
 
     @SuppressWarnings("unchecked")
     private ProductionModelSummary parseProductionSummary(Map<String, Object> map) {
-        if (map == null || map.isEmpty()) return null;
-        Map<String, Object> metricsMap = map.get("metricas") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
+        if (map == null || map.isEmpty())
+            return null;
+        Map<String, Object> metricsMap = map.get("metricas") instanceof Map<?, ?> m ? (Map<String, Object>) m
+                : Map.of();
         return new ProductionModelSummary(
                 extractString(map, "nombre_modelo", "xgboost"),
                 extractString(map, "version", ""),
@@ -383,15 +390,16 @@ public class MlFeignClientAdapter implements ExternalMlService {
                 extractString(map, "run_id", ""),
                 parseMetrics(metricsMap),
                 extractString(map, "creado_en", ""),
-                extractString(map, "fuente_artefacto", "")
-        );
+                extractString(map, "fuente_artefacto", ""));
     }
 
     @SuppressWarnings("unchecked")
     private CandidateBenchmarkSummary parseCandidateSummary(Map<String, Object> map) {
-        if (map == null || map.isEmpty()) return null;
+        if (map == null || map.isEmpty())
+            return null;
         Map<String, Object> candMap = map.get("candidato") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
-        Map<String, Object> metricsMap = candMap.get("metricas") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
+        Map<String, Object> metricsMap = candMap.get("metricas") instanceof Map<?, ?> m ? (Map<String, Object>) m
+                : Map.of();
         CandidateModelSummary candSummary = new CandidateModelSummary(
                 extractString(candMap, "nombre_modelo", "xgboost"),
                 extractString(candMap, "version", ""),
@@ -399,8 +407,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                 extractString(candMap, "run_id", ""),
                 parseMetrics(metricsMap),
                 extractString(candMap, "creado_en", ""),
-                extractString(candMap, "fuente_artefacto", "")
-        );
+                extractString(candMap, "fuente_artefacto", ""));
 
         Map<String, Object> deltasMap = map.get("deltas") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
         BenchmarkDeltas deltas = new BenchmarkDeltas(
@@ -409,58 +416,65 @@ public class MlFeignClientAdapter implements ExternalMlService {
                 extractDouble(deltasMap, "delta_mae"),
                 extractDouble(deltasMap, "delta_rmse"),
                 extractBoolean(deltasMap, "mejora_mape", false),
-                extractBoolean(deltasMap, "mejora_r2", false)
-        );
+                extractBoolean(deltasMap, "mejora_r2", false));
 
         return new CandidateBenchmarkSummary(
                 candSummary,
                 deltas,
                 extractString(map, "recomendacion", ""),
-                extractString(map, "motivo", "")
-        );
+                extractString(map, "motivo", ""));
     }
 
     private BenchmarkMetrics parseMetrics(Map<String, Object> m) {
-        if (m == null || m.isEmpty()) return null;
+        if (m == null || m.isEmpty())
+            return null;
         Double mape = extractDouble(m, "mape_pct");
-        if (mape == null) mape = extractDouble(m, "mape");
+        if (mape == null)
+            mape = extractDouble(m, "mape");
         return new BenchmarkMetrics(
                 mape,
                 extractDouble(m, "r2"),
                 extractDouble(m, "mae"),
                 extractDouble(m, "rmse"),
                 extractInteger(m, "n_train", null),
-                extractInteger(m, "n_test", null)
-        );
+                extractInteger(m, "n_test", null));
     }
 
     private Double extractDouble(Map<String, Object> map, String key) {
-        if (map == null) return null;
+        if (map == null)
+            return null;
         return toDouble(map.get(key));
     }
 
     private Double toDouble(Object val) {
-        if (val instanceof Number n) return n.doubleValue();
+        if (val instanceof Number n)
+            return n.doubleValue();
         if (val instanceof String s) {
-            try { return Double.parseDouble(s); } catch (NumberFormatException ignored) {}
+            try {
+                return Double.parseDouble(s);
+            } catch (NumberFormatException ignored) {
+            }
         }
         return null;
     }
 
     private String extractString(Map<String, Object> map, String key, String defaultVal) {
-        if (map == null || !map.containsKey(key)) return defaultVal;
+        if (map == null || !map.containsKey(key))
+            return defaultVal;
         Object val = map.get(key);
         return val != null ? val.toString() : defaultVal;
     }
 
     private Integer extractInteger(Map<String, Object> map, String key, Integer defaultVal) {
-        if (map == null || !map.containsKey(key)) return defaultVal;
+        if (map == null || !map.containsKey(key))
+            return defaultVal;
         Object val = map.get(key);
         return val instanceof Number n ? n.intValue() : defaultVal;
     }
 
     private boolean extractBoolean(Map<String, Object> map, String key, boolean defaultVal) {
-        if (map == null || !map.containsKey(key)) return defaultVal;
+        if (map == null || !map.containsKey(key))
+            return defaultVal;
         Object val = map.get(key);
         return val instanceof Boolean b ? b : defaultVal;
     }
@@ -469,7 +483,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
     public boolean isTrainingAvailable() {
         try {
             Map<String, Object> status = feignClient.getLatestJobStatus();
-            if (status == null) return true;
+            if (status == null)
+                return true;
             Object disponible = status.get("disponible_para_entrenar");
             if (disponible instanceof Boolean b) {
                 return b;
@@ -494,12 +509,14 @@ public class MlFeignClientAdapter implements ExternalMlService {
             return feignClient.getIpcConfig();
         } catch (Exception e) {
             log.error("Failed to get IPC config from ML service: {}", e.getMessage());
-            throw new MlServiceException(503, "No se pudo obtener la configuración IPC desde el servicio ML: " + e.getMessage());
+            throw new MlServiceException(503,
+                    "No se pudo obtener la configuración IPC desde el servicio ML: " + e.getMessage());
         }
     }
 
     @Override
-    public Map<String, Object> updateIpcConfig(Double valor, String periodo, String fuente, String actualizadoPor, String nota, String aplicarA) {
+    public Map<String, Object> updateIpcConfig(Double valor, String periodo, String fuente, String actualizadoPor,
+            String nota, String aplicarA) {
         try {
             FastApiUpdateIpcRequest req = new FastApiUpdateIpcRequest(
                     valor,
@@ -507,8 +524,7 @@ public class MlFeignClientAdapter implements ExternalMlService {
                     fuente,
                     actualizadoPor,
                     nota,
-                    aplicarA != null ? aplicarA : "ambos"
-            );
+                    aplicarA != null ? aplicarA : "ambos");
             return feignClient.updateIpcConfig(req);
         } catch (Exception e) {
             log.error("Failed to update IPC config in ML service: {}", e.getMessage());
@@ -522,7 +538,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
             return feignClient.getRecursos();
         } catch (Exception e) {
             log.error("Failed to get system resources from ML service: {}", e.getMessage());
-            throw new MlServiceException(503, "No se pudo obtener la telemetría de recursos desde el servicio ML: " + e.getMessage());
+            throw new MlServiceException(503,
+                    "No se pudo obtener la telemetría de recursos desde el servicio ML: " + e.getMessage());
         }
     }
 
@@ -532,7 +549,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
             return feignClient.getLatenciaP95(operationType.toLowerCase());
         } catch (Exception e) {
             log.error("Failed to get latency metrics from ML service: {}", e.getMessage());
-            throw new MlServiceException(503, "No se pudo obtener las métricas de latencia desde el servicio ML: " + e.getMessage());
+            throw new MlServiceException(503,
+                    "No se pudo obtener las métricas de latencia desde el servicio ML: " + e.getMessage());
         }
     }
 
@@ -542,7 +560,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
             return feignClient.getModelHistory(operationType.toLowerCase());
         } catch (Exception e) {
             log.error("Failed to get model history from ML service: {}", e.getMessage());
-            throw new MlServiceException(503, "No se pudo obtener el historial de modelos desde el servicio ML: " + e.getMessage());
+            throw new MlServiceException(503,
+                    "No se pudo obtener el historial de modelos desde el servicio ML: " + e.getMessage());
         }
     }
 
@@ -552,7 +571,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
             return feignClient.getFluctuacionTemporal(operationType.toLowerCase());
         } catch (Exception e) {
             log.error("Failed to get temporal fluctuation from ML service: {}", e.getMessage());
-            throw new MlServiceException(503, "No se pudo obtener la fluctuación temporal desde el servicio ML: " + e.getMessage());
+            throw new MlServiceException(503,
+                    "No se pudo obtener la fluctuación temporal desde el servicio ML: " + e.getMessage());
         }
     }
 
@@ -562,7 +582,8 @@ public class MlFeignClientAdapter implements ExternalMlService {
             return feignClient.getModelInfo(operationType.toLowerCase());
         } catch (Exception e) {
             log.error("Failed to get model info from ML service: {}", e.getMessage());
-            throw new MlServiceException(503, "No se pudo obtener la información del modelo desde el servicio ML: " + e.getMessage());
+            throw new MlServiceException(503,
+                    "No se pudo obtener la información del modelo desde el servicio ML: " + e.getMessage());
         }
     }
 }
