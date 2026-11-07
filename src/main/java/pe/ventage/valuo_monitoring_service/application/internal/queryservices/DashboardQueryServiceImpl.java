@@ -164,4 +164,14 @@ public class DashboardQueryServiceImpl implements DashboardQueryService {
     public java.util.Map<String, Object> getLatencyMetrics(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType) {
         return externalMlService.getLatencyMetrics(operationType.name().toLowerCase());
     }
+
+    @Override
+    public java.util.Map<String, Object> getTemporalFluctuation(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType) {
+        return externalMlService.getFluctuacionTemporal(operationType.name().toLowerCase());
+    }
+
+    @Override
+    public java.util.Map<String, Object> getModelInfo(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType) {
+        return externalMlService.getModelInfo(operationType.name().toLowerCase());
+    }
 }

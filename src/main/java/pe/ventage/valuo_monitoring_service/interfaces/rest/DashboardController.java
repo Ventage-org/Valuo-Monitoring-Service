@@ -84,4 +84,20 @@ public class DashboardController {
     ) {
         return ResponseEntity.ok(dashboardQueryService.getLatencyMetrics(OperationType.fromString(operationType)));
     }
+
+    @GetMapping("/temporal-fluctuation")
+    @Operation(summary = "Fluctuación temporal del ciclo de mercado", description = "Retorna la serie temporal de degradación (MAPE/MAE histórico vs reciente) frente al umbral máximo de 15%.")
+    public ResponseEntity<java.util.Map<String, Object>> getTemporalFluctuation(
+            @RequestParam(defaultValue = "VENTA") String operationType
+    ) {
+        return ResponseEntity.ok(dashboardQueryService.getTemporalFluctuation(OperationType.fromString(operationType)));
+    }
+
+    @GetMapping("/model-info")
+    @Operation(summary = "Ficha técnica y metadatos del modelo activo", description = "Retorna información detallada del modelo en memoria RAM: versión, archivo, periodos train/test, 33 variables y 22 distritos.")
+    public ResponseEntity<java.util.Map<String, Object>> getModelInfo(
+            @RequestParam(defaultValue = "VENTA") String operationType
+    ) {
+        return ResponseEntity.ok(dashboardQueryService.getModelInfo(OperationType.fromString(operationType)));
+    }
 }

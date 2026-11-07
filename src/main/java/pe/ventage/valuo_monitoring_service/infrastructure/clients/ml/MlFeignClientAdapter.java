@@ -145,6 +145,42 @@ public class MlFeignClientAdapter implements ExternalMlService {
     }
 
     @Override
+    public MlDiscardResponse discardModel(MlDiscardParams params) {
+        FastApiDiscardRequest req = new FastApiDiscardRequest(
+                params.operationType().toLowerCase(),
+                params.version(),
+                params.reason()
+        );
+        FastApiDiscardResponse res = feignClient.discardModel(req);
+        boolean success = res != null && (Boolean.TRUE.equals(res.exito()) || "Archived".equalsIgnoreCase(res.nuevoStage()));
+
+        Map<String, Object> metrics = res != null ? res.metricas() : Collections.emptyMap();
+        Double mape = metrics != null ? extractDouble(metrics, "mape_pct") : null;
+        if (mape == null && metrics != null) mape = extractDouble(metrics, "mape");
+        Double r2 = metrics != null ? extractDouble(metrics, "r2") : null;
+        Double mae = metrics != null ? extractDouble(metrics, "mae") : null;
+        if (mae == null && metrics != null) mae = extractDouble(metrics, "mae_soles");
+        Double rmse = metrics != null ? extractDouble(metrics, "rmse") : null;
+        if (rmse == null && metrics != null) rmse = extractDouble(metrics, "rmse_soles");
+
+        String msg = res != null && res.mensaje() != null
+                ? res.mensaje()
+                : "Modelo candidato descartado y archivado exitosamente.";
+
+        return new MlDiscardResponse(
+                success,
+                res != null && res.versionDescartada() != null ? res.versionDescartada() : params.version(),
+                res != null && res.nuevoStage() != null ? res.nuevoStage() : "Archived",
+                msg,
+                mape,
+                r2,
+                mae,
+                rmse,
+                res != null ? res.descartadoEn() : null
+        );
+    }
+
+    @Override
     @SuppressWarnings("unchecked")
     public MlHealthMetricsResponse getHealthMetrics(String operationType) {
         try {
@@ -507,6 +543,26 @@ public class MlFeignClientAdapter implements ExternalMlService {
         } catch (Exception e) {
             log.error("Failed to get model history from ML service: {}", e.getMessage());
             throw new MlServiceException(503, "No se pudo obtener el historial de modelos desde el servicio ML: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Map<String, Object> getFluctuacionTemporal(String operationType) {
+        try {
+            return feignClient.getFluctuacionTemporal(operationType.toLowerCase());
+        } catch (Exception e) {
+            log.error("Failed to get temporal fluctuation from ML service: {}", e.getMessage());
+            throw new MlServiceException(503, "No se pudo obtener la fluctuación temporal desde el servicio ML: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Map<String, Object> getModelInfo(String operationType) {
+        try {
+            return feignClient.getModelInfo(operationType.toLowerCase());
+        } catch (Exception e) {
+            log.error("Failed to get model info from ML service: {}", e.getMessage());
+            throw new MlServiceException(503, "No se pudo obtener la información del modelo desde el servicio ML: " + e.getMessage());
         }
     }
 }

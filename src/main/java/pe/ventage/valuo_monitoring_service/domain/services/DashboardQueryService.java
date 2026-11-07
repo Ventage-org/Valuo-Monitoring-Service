@@ -9,4 +9,6 @@ public interface DashboardQueryService {
     ConceptDriftResult handle(GetConceptDriftQuery query);
     java.util.Map<String, Object> getSystemResources();
     java.util.Map<String, Object> getLatencyMetrics(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType);
+    java.util.Map<String, Object> getTemporalFluctuation(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType);
+    java.util.Map<String, Object> getModelInfo(pe.ventage.valuo_monitoring_service.domain.model.valueobjects.OperationType operationType);
 }

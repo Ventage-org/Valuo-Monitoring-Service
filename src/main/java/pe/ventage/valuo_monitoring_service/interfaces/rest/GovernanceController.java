@@ -129,6 +129,23 @@ public class GovernanceController {
         return ResponseEntity.ok(ModelTransitionLogResourceFromEntityAssembler.toResourceFromEntity(transitionLog));
     }
 
+    @PostMapping("/discard")
+    @Operation(summary = "Descartar y archivar modelo candidato", description = "Rechaza un modelo candidato no satisfactorio, transiciona MLflow a Archived y limpia la cola de benchmark.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Modelo descartado y archivado exitosamente"),
+            @ApiResponse(responseCode = "400", description = "Parámetros inválidos o intento de descartar versión en producción"),
+            @ApiResponse(responseCode = "503", description = "Servicio ML no disponible")
+    })
+    public ResponseEntity<ModelTransitionLogResponseResource> discardModel(
+            @Valid @RequestBody pe.ventage.valuo_monitoring_service.interfaces.rest.resources.DiscardModelResource resource
+    ) {
+        pe.ventage.valuo_monitoring_service.domain.model.commands.DiscardModelCommand command =
+                pe.ventage.valuo_monitoring_service.interfaces.rest.transform.DiscardModelCommandFromResourceAssembler
+                        .toCommandFromResource(resource, MOCK_ADMIN_EMAIL);
+        ModelTransitionLog transitionLog = commandService.handle(command);
+        return ResponseEntity.ok(ModelTransitionLogResourceFromEntityAssembler.toResourceFromEntity(transitionLog));
+    }
+
     @GetMapping("/benchmark")
     @Operation(summary = "Comparativa Benchmark: Producción vs Candidatos", description = "Compara el modelo actualmente en producción contra los modelos candidatos reentrenados para decidir promociones.")
     @ApiResponses({

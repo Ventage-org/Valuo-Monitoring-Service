@@ -170,4 +170,40 @@ class DashboardControllerTest {
                 .andExpect(jsonPath("$.memory_used_mb").value(450.0))
                 .andExpect(jsonPath("$.memory_total_mb").value(1213.0));
     }
+
+    @Test
+    @DisplayName("GET /api/v1/dashboard/temporal-fluctuation - Serie temporal de degradación MAPE/MAE")
+    void getTemporalFluctuation_success() throws Exception {
+        when(dashboardQueryService.getTemporalFluctuation(OperationType.VENTA)).thenReturn(Map.of(
+                "operation_type", "venta",
+                "threshold_mape", 15.0,
+                "average_mape", 14.73,
+                "total_evaluated_samples", 23737
+        ));
+
+        mockMvc.perform(get("/api/v1/dashboard/temporal-fluctuation?operationType=VENTA"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.operation_type").value("venta"))
+                .andExpect(jsonPath("$.threshold_mape").value(15.0))
+                .andExpect(jsonPath("$.average_mape").value(14.73))
+                .andExpect(jsonPath("$.total_evaluated_samples").value(23737));
+    }
+
+    @Test
+    @DisplayName("GET /api/v1/dashboard/model-info - Ficha técnica del modelo activo")
+    void getModelInfo_success() throws Exception {
+        when(dashboardQueryService.getModelInfo(OperationType.VENTA)).thenReturn(Map.of(
+                "version", "v1_mlflow",
+                "archivo", "xgboost_venta_v1.pkl",
+                "n_features", 33,
+                "n_distritos", 22
+        ));
+
+        mockMvc.perform(get("/api/v1/dashboard/model-info?operationType=VENTA"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.version").value("v1_mlflow"))
+                .andExpect(jsonPath("$.archivo").value("xgboost_venta_v1.pkl"))
+                .andExpect(jsonPath("$.n_features").value(33))
+                .andExpect(jsonPath("$.n_distritos").value(22));
+    }
 }

@@ -179,6 +179,35 @@ public class GovernanceCommandServiceImpl implements GovernanceCommandService {
 
     @Override
     @Transactional
+    public ModelTransitionLog handle(pe.ventage.valuo_monitoring_service.domain.model.commands.DiscardModelCommand command) {
+        log.info("Processing DiscardModelCommand for operationType={}, version={}", command.operationType(), command.version());
+
+        MlDiscardParams params = new MlDiscardParams(
+                command.operationType().name().toLowerCase(),
+                command.version(),
+                command.reason()
+        );
+
+        MlDiscardResponse response = externalMlService.discardModel(params);
+        if (!response.success()) {
+            throw new InvalidDomainAttributeException("Model discard rejected by ML service: " + response.message());
+        }
+
+        ModelTransitionLog logEntry = ModelTransitionLog.forDiscard(
+                command.operationType(),
+                response.versionDiscarded(),
+                command.discardedBy(),
+                command.reason(),
+                response.mape(),
+                response.r2(),
+                response.mae(),
+                response.rmse()
+        );
+        return transitionLogRepository.save(logEntry);
+    }
+
+    @Override
+    @Transactional
     public ModelTrainingJob handle(SyncJobStatusCommand command) {
         ModelTrainingJob job = jobRepository.findByJobId(command.jobId())
                 .orElseThrow(() -> new ModelTrainingJobNotFoundException(command.jobId()));

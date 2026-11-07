@@ -7,7 +7,8 @@ public enum TransitionAction {
     ROLLBACK,
     TRAINING,
     ARCHIVAL,
-    CREATION;
+    CREATION,
+    DISCARD;
 
     public static TransitionAction fromString(String value) {
         if (value == null || value.isBlank()) {

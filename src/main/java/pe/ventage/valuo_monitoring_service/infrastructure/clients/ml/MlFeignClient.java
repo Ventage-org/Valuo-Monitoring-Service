@@ -45,6 +45,9 @@ public interface MlFeignClient {
     @PostMapping("/api/v1/admin/modelos/rollback")
     FastApiActionResponse rollbackModel(@RequestBody FastApiRollbackRequest request);
 
+    @PostMapping("/api/v1/admin/modelos/descartar")
+    FastApiDiscardResponse discardModel(@RequestBody FastApiDiscardRequest request);
+
     // 3. Monitoreo y Observabilidad
     @GetMapping("/api/v1/admin/monitoreo/drift/{tipo_operacion}")
     Map<String, Object> getDataDrift(@PathVariable("tipo_operacion") String tipoOperacion);

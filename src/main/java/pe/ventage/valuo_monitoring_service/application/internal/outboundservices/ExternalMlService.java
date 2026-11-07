@@ -11,6 +11,7 @@ public interface ExternalMlService {
     Optional<MlJobStatusResponse> getJobStatus(String jobId);
     MlPromoteResponse promoteModel(MlPromoteParams params);
     MlRollbackResponse rollbackModel(MlRollbackParams params);
+    MlDiscardResponse discardModel(MlDiscardParams params);
     MlHealthMetricsResponse getHealthMetrics(String operationType);
     MlDriftStatusResponse getDriftStatus(String operationType);
     MlDataDriftDetailResponse getDataDrift(String operationType, String temporalRange);
@@ -23,6 +24,8 @@ public interface ExternalMlService {
     java.util.Map<String, Object> getSystemResources();
     java.util.Map<String, Object> getLatencyMetrics(String operationType);
     java.util.Map<String, Object> getModelHistory(String operationType);
+    java.util.Map<String, Object> getFluctuacionTemporal(String operationType);
+    java.util.Map<String, Object> getModelInfo(String operationType);
 
     record MlTriggerTrainingParams(String operationType, String datasetVersion, String targetMetric, boolean guardarComoActivo, Integer maxDepth, Double learningRate) {}
     record MlJobTriggerResponse(String jobId, String status, String message) {}
@@ -51,6 +54,18 @@ public interface ExternalMlService {
             Double deltaMae,
             Double deltaRmse,
             Boolean mejoraMape
+    ) {}
+    record MlDiscardParams(String operationType, String version, String reason) {}
+    record MlDiscardResponse(
+            boolean success,
+            String versionDiscarded,
+            String newStage,
+            String message,
+            Double mape,
+            Double r2,
+            Double mae,
+            Double rmse,
+            String discardedAt
     ) {}
     record MlHealthMetricsResponse(String operationType, String activeModelVersion, Double r2, Double mae, Double mape, String status) {}
     record MlDriftStatusResponse(String operationType, boolean dataDriftDetected, boolean conceptDriftDetected, Double shareOfDriftedFeatures, int driftedFeaturesCount, int totalFeaturesCount, Double wassersteinDistance, Double psiScore) {}

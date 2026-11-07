@@ -193,4 +193,42 @@ class GovernanceCommandServiceImplTest {
         assertTrue((Boolean) res.get("exito"));
         verify(externalMlService, times(1)).updateIpcConfig(169.5, "2026-Q2", "INEI", "Joaquin Cortez", "Ajuste", "ambos");
     }
+
+    @Test
+    @DisplayName("Descartar modelo candidato exitosamente")
+    void discardModel_success() {
+        pe.ventage.valuo_monitoring_service.domain.model.commands.DiscardModelCommand command =
+                new pe.ventage.valuo_monitoring_service.domain.model.commands.DiscardModelCommand(
+                        OperationType.VENTA, "8", "MAPE alto", "admin@valuo.pe"
+                );
+
+        when(externalMlService.discardModel(any())).thenReturn(new MlDiscardResponse(
+                true, "8", "Archived", "Descartado exitosamente", 18.2, 0.69, 61240.0, 91204.0, "2026-11-07T12:00:00Z"
+        ));
+        when(transitionLogRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+
+        ModelTransitionLog log = commandService.handle(command);
+
+        assertNotNull(log);
+        assertEquals(OperationType.VENTA, log.getOperationType());
+        assertEquals("8", log.getModelVersion());
+        assertEquals("DISCARDED", log.getStatus());
+        assertEquals(ModelStage.ARCHIVED, log.getNewStage());
+    }
+
+    @Test
+    @DisplayName("Descartar modelo arroja excepción si el servicio ML lo rechaza")
+    void discardModel_rejected() {
+        pe.ventage.valuo_monitoring_service.domain.model.commands.DiscardModelCommand command =
+                new pe.ventage.valuo_monitoring_service.domain.model.commands.DiscardModelCommand(
+                        OperationType.VENTA, "8", "No deseado", "admin@valuo.pe"
+                );
+
+        when(externalMlService.discardModel(any())).thenReturn(new MlDiscardResponse(
+                false, "8", null, "No se puede descartar versión en producción", null, null, null, null, null
+        ));
+
+        assertThrows(pe.ventage.valuo_monitoring_service.domain.model.exceptions.InvalidDomainAttributeException.class,
+                () -> commandService.handle(command));
+    }
 }

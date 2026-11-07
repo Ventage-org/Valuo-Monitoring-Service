@@ -156,6 +156,42 @@ public class ModelTransitionLog {
         return log;
     }
 
+    public static ModelTransitionLog forDiscard(
+            OperationType operationType,
+            String targetVersion,
+            String performedBy,
+            String reason,
+            Double mape,
+            Double r2,
+            Double mae,
+            Double rmse
+    ) {
+        if (operationType == null) {
+            throw new InvalidDomainAttributeException("OperationType cannot be null");
+        }
+
+        ModelTransitionLog log = new ModelTransitionLog();
+        log.modelVersion = (targetVersion != null && !targetVersion.isBlank()) ? targetVersion.trim() : "candidato";
+        log.previousVersion = null;
+        log.operationType = operationType;
+        log.previousStage = ModelStage.CANDIDATE;
+        log.newStage = ModelStage.ARCHIVED;
+        log.action = TransitionAction.DISCARD;
+        log.performedBy = performedBy != null ? performedBy : "system";
+        log.reason = reason;
+        log.status = "DISCARDED";
+        log.deltaMapePct = mape;
+        log.deltaR2 = r2;
+        log.deltaMae = mae;
+        log.deltaRmse = rmse;
+        log.mejoraMape = false;
+        log.metricChangeSummary = String.format("Candidato descartado y archivado: MAPE=%.2f%% | R²=%.4f",
+                mape != null ? mape : 0.0,
+                r2 != null ? r2 : 0.0);
+        log.createdAt = LocalDateTime.now();
+        return log;
+    }
+
     public static ModelTransitionLog forTraining(
             OperationType operationType,
             String activeVersion,

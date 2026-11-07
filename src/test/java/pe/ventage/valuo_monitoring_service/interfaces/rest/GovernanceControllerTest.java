@@ -249,6 +249,58 @@ class GovernanceControllerTest {
                 .andExpect(jsonPath("$.status").value("SUCCESS"));
     }
 
+    @Test
+    @DisplayName("POST /api/v1/governance/discard - Descartar modelo candidato y archivar")
+    void discardModel_success() throws Exception {
+        pe.ventage.valuo_monitoring_service.interfaces.rest.resources.DiscardModelResource resource =
+                new pe.ventage.valuo_monitoring_service.interfaces.rest.resources.DiscardModelResource(
+                        "VENTA",
+                        "8",
+                        "MAPE 18.2% supera umbral máximo de 15.0%"
+                );
+
+        ModelTransitionLog log = ModelTransitionLog.forDiscard(
+                OperationType.VENTA,
+                "8",
+                "admin@valuo.pe",
+                "MAPE 18.2% supera umbral máximo de 15.0%",
+                18.2,
+                0.69,
+                61240.0,
+                91204.0
+        );
+
+        when(commandService.handle(any(pe.ventage.valuo_monitoring_service.domain.model.commands.DiscardModelCommand.class)))
+                .thenReturn(log);
+
+        mockMvc.perform(post("/api/v1/governance/discard")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(resource)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.action").value("DISCARD"))
+                .andExpect(jsonPath("$.operation_type").value("VENTA"))
+                .andExpect(jsonPath("$.new_version").value("8"))
+                .andExpect(jsonPath("$.status").value("DISCARDED"));
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/governance/discard - Retorna 400 con cuerpo inválido (sin motivo)")
+    void discardModel_badRequest() throws Exception {
+        String invalidJson = """
+                {
+                  "operation_type": "VENTA",
+                  "version": "8",
+                  "reason": ""
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/governance/discard")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(invalidJson))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.title").value("Bad Request"));
+    }
+
     // ==========================================
     // 4. BENCHMARK E HISTORIAL MLFLOW (ALQUILER)
     // ==========================================
