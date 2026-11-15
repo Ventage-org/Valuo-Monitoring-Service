@@ -82,6 +82,10 @@ public final class ModelBenchmarkResourceAssembler {
                 metrics.r2(),
                 metrics.mae(),
                 metrics.rmse(),
+                metrics.codIaao(),
+                metrics.covIaao(),
+                metrics.prdIaao(),
+                metrics.prbIaao(),
                 metrics.nTrain(),
                 metrics.nTest()
         );

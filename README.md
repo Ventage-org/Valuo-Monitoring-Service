@@ -166,13 +166,33 @@ Para respetar los estándares de inmutabilidad en auditoría:
     }
     ```
 
-### 3.6. Telemetría de Recursos y Latencia del Servicio ML
+### 3.6. Descartar y Archivar Modelo Candidato
+- **Método y Ruta:** `POST /api/v1/governance/discard`
+- **Request Body:**
+  ```json
+  {
+    "operation_type": "VENTA",
+    "version": "8",
+    "reason": "Rechazado por exceder umbral MAPE del 15.0%"
+  }
+  ```
+- **Comportamiento:** Archiva en MLflow la versión candidata (`stage="Archived"`, tag `estado_gobernanza="discarded"`), la retira del benchmark y genera el registro en auditoría (`action="DISCARD"`).
+
+### 3.7. Fluctuación Temporal y Ficha Técnica del Modelo
+- **Serie de Degradación Temporal:** `GET /api/v1/dashboard/temporal-fluctuation?operationType=VENTA`
+  - Retorna la serie histórica trimestral (MAPE y MAE vs cota del 15%) para la gráfica de línea temporal.
+- **Ficha Técnica del Modelo Activo:** `GET /api/v1/dashboard/model-info?operationType=VENTA`
+  - Retorna versión, archivo binario `.pkl`, periodos train/test, 33 variables predictoras y distritos soportados.
+
+### 3.8. Telemetría de Recursos y Latencia del Servicio ML
 - **Recursos del Contenedor:** `GET /api/v1/dashboard/resources`
   - Retorna uso de CPU %, memoria RAM usada y total en MB, uptime y threads activos.
 - **Latencia P95 e Integridad:** `GET /api/v1/dashboard/latency?operationType=VENTA`
   - Retorna percentiles de latencia (P50, P95, P99 ms), cumplimiento de SLA (100 ms) y hash SHA-256 del modelo en producción.
 - **Disponibilidad de Entrenamiento:** `GET /api/v1/governance/training/availability`
   - Permite al frontend saber si el botón de reentrenamiento debe estar habilitado o deshabilitado en tiempo real.
+
+> 📘 **Documentación completa de APIs para Frontend:** Consulta [`API_DOCUMENTATION_FRONTEND.md`](API_DOCUMENTATION_FRONTEND.md) para la especificación detallada de los 16 endpoints con payloads, validaciones y códigos de error.
 
 ---
 
