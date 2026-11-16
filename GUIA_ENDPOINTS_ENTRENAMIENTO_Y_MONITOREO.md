@@ -1,0 +1,2020 @@
+# Guía de Integración Backend: Endpoints de Reentrenamiento, Monitoreo y Gobernanza de Modelos ML
+
+**Documento:** Especificación Técnica de APIs para el Módulo de Monitoreo  
+**Microservicio:** `ml-service` (FastAPI + XGBoost + MLflow Tracking & Registry)  
+**Proyecto:** Valuación Inmobiliaria Masiva en Lima Metropolitana  
+**Fecha:** Octubre 2026  
+**Versión de API:** `v1`  
+
+---
+
+## 1. Arquitectura de Integración y Principios de Diseño
+
+El sistema separa las responsabilidades entre el **Backend Principal** (NestJS / Node / Spring / Django) y el **Microservicio ML** (`ml-service`):
+
+```
+┌─────────────────────────┐          HTTP REST          ┌───────────────────────────┐
+│    Backend Principal    │  ─────────────────────────> │        ml-service         │
+│  (Módulo de Monitoreo)  │                             │         (FastAPI)         │
+│                         │  <───────────────────────── │                           │
+└───────────┬─────────────┘      (Polling / Respuestas) └─────────────┬─────────────┘
+            │                                                         │
+            ▼                                                         ▼
+┌─────────────────────────┐                             ┌───────────────────────────┐
+│ PostgreSQL Operacional  │                             │ MLflow Tracking & Registry│
+│ (db_operacional_valuo)  │                             │  (localhost:5000 / mlops) │
+│ - Auditoría de jobs     │                             │ - Versiones de modelos    │
+│ - Historial promociones │                             │ - Métricas (MAPE, IAAO)   │
+└─────────────────────────┘                             └───────────────────────────┘
+```
+
+### Principios Clave:
+1. **Asincronía y No-Bloqueo:** Los pipelines de entrenamiento procesan >40,000 registros y calculan SHAP values, tomando entre 25 y 45 segundos. Por ello, el inicio de entrenamiento retorna inmediatamente **HTTP 202 (Accepted)** con un `job_id`. El backend realiza polling sobre `/estado/{job_id}`.
+2. **Control de Concurrencia (Semáforo):** Solo se permite **un (1) job de entrenamiento simultáneo**. Si se intenta lanzar un segundo entrenamiento mientras uno está en curso, la API responde **HTTP 409 Conflict**.
+3. **Gobernanza Human-in-the-Loop:** Por defecto, los nuevos modelos se registran en MLflow como **`Candidate`** para que el administrador examine sus métricas (MAPE, $R^2$, COD IAAO) en el panel de monitoreo. Si se aprueba, el backend invoca el endpoint de promoción (`/promover`), ejecutando **Hot-Reload en memoria RAM** sin tiempo de inactividad (*zero-downtime*).
+4. **Seguridad:** Todas las rutas administrativas (`/api/v1/admin/*`) requieren el header `X-Admin-Token` si la variable de entorno `ADMIN_TOKEN` está configurada en `.env`.
+
+---
+
+
+### 1.1. Matriz de Clasificación por Rol y Microservicio Consumidor
+
+Para garantizar una arquitectura desacoplada y una correcta asignación de permisos en el API Gateway, la totalidad de los 25 endpoints del servicio se dividen estrictamente en dos dominios de consumo:
+
+```
++----------------------------------------------------------------------------------------------------+
+|                                    API GATEWAY / MICROSERVICIOS                                    |
++-------------------------------------------------+--------------------------------------------------+
+|                   DOMINIO 1:                    |                    DOMINIO 2:                    |
+|    USUARIO FINAL / PREDICCIÓN EN TIEMPO REAL    |      ADMINISTRADOR / MONITOREO Y GOBERNANZA      |
+|           (valuo-prediction-service)            |            (valuo-monitoring-service)            |
++-------------------------------------------------+--------------------------------------------------+
+| - Consumidor: Usuario web inmobiliario          | - Consumidor: Administrador del sistema / MLOps   |
+| - Autenticación: Pública / Token de usuario     | - Autenticación: Header obligatorio X-Admin-Token|
+| - Objetivo: Formulario de tasación, avalúo      | - Objetivo: Reentrenamiento, métricas IAAO,      |
+|   en soles, explicabilidad SHAP y comparables   |   benchmark de modelos, telemetría y drift       |
++-------------------------------------------------+--------------------------------------------------+
+```
+
+#### Tabla de Enrutamiento y Responsabilidades:
+
+| Microservicio / Rol Consumidor | Endpoint / Ruta REST | Método | Auth Requerida | Propósito y Función en la Arquitectura |
+| :--- | :--- | :---: | :---: | :--- |
+| **Predicción (Usuario Final)** | `/api/v1/prediccion/venta` | `POST` | Pública / User | Tasación de compraventa con datos del inmueble ingresados por el usuario. Retorna precio en soles constantes y nominales, rango ±MAPE (14.86%), 29 variables SHAP (con estrato consolidado), alerta censal ENAHO y 3 comparables RNTP. |
+| **Predicción (Usuario Final)** | `/api/v1/prediccion/alquiler` | `POST` | Pública / User | Estimación de renta mensual de alquiler con datos del inmueble. Retorna alquiler PEN constantes y nominales, rango ±MAPE (13.68%), 29 variables SHAP (con estrato consolidado), alerta censal ENAHO y 3 comparables RNTP. |
+| **Predicción (Usuario Final)** | `/api/v1/distritos` | `GET` | Pública | Catálogo de los 22 distritos válidos de Lima Metropolitana para poblar el dropdown del formulario web. |
+| **Predicción (Usuario Final)** | `/api/v1/distritos/{distrito}/contexto` | `GET` | Pública | Micro-entorno enriquecido unificado (Estrato socioeconómico oficial INEI/ENAHO con alerta de estimación imputada en distritos de muestra reducida, seguridad PNP, distancias y tiempos a pie a parques, transporte, salud y comercio). Admite `lat` y `lon` opcionales. |
+| **Predicción (Usuario Final)** | `/api/v1/modelos/sensibilidad-factores` | `GET` | Pública | Desglose de los 4 macro-factores del mercado inmobiliario para la Landing Page pública y gráficos de sensibilidad. |
+| **Predicción (Usuario Final)** | `/api/v1/modelos/sensibilidad-factores/{tipo_op}` | `GET` | Pública | Macro-factores específicos para venta o alquiler. |
+| **Infraestructura / Gateway** | `/health` | `GET` | Pública | Liveness / Readiness probe para verificar estado de RAM y modelos cargados. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/entrenamiento/venta` | `POST` | `X-Admin-Token` | Lanza reentrenamiento asíncrono de venta (Job en segundo plano, genera modelo `Candidate`). |
+| **Monitoreo (Administrador)** | `/api/v1/admin/entrenamiento/alquiler` | `POST` | `X-Admin-Token` | Lanza reentrenamiento asíncrono de alquiler (Job en segundo plano, genera modelo `Candidate`). |
+| **Monitoreo (Administrador)** | `/api/v1/admin/entrenamiento/inicial/{tipo_op}` | `POST` | `X-Admin-Token` | Bootstrap inicial en frío que entrena y promueve automáticamente a `@champion` en producción. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/entrenamiento/estado/{job_id}` | `GET` | `X-Admin-Token` | Polling del progreso, fases y métricas preliminares del job de entrenamiento. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/entrenamiento/estado` | `GET` | `X-Admin-Token` | Consulta rápida de disponibilidad y estado del último job. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/entrenamiento/jobs` | `GET` | `X-Admin-Token` | Listado histórico de jobs ejecutados en la sesión actual. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/modelos/benchmark/{tipo_op}` | `GET` | `X-Admin-Token` | Cuadro comparativo entre el modelo `@champion` en producción vs los candidatos para decisión humana. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/modelos/historial/{tipo_op}` | `GET` | `X-Admin-Token` | Auditoría de todas las versiones registradas en MLflow Model Registry. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/modelos/promover` | `POST` | `X-Admin-Token` | Promoción formal: el administrador aprueba un candidato y se ejecuta Hot-Reload en RAM sin downtime. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/modelos/rollback` | `POST` | `X-Admin-Token` | Rollback preventivo a una versión archivada con Hot-Reload inmediato en RAM. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/modelos/descartar` | `POST` | `X-Admin-Token` | Descarte formal: el administrador rechaza un candidato deficiente, archiva en MLflow y limpia la cola de benchmark. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/monitoreo/recursos` | `GET` | `X-Admin-Token` | Telemetría en vivo del uso de CPU y memoria RAM del contenedor. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/monitoreo/drift/{tipo_op}` | `GET` | `X-Admin-Token` | Auditoría de Data Drift mediante el Population Stability Index (PSI). |
+| **Monitoreo (Administrador)** | `/api/v1/admin/monitoreo/fluctuacion-temporal/{tipo_op}` | `GET` | `X-Admin-Token` | Detección de degradación del modelo a lo largo del tiempo (MAPE/MAE histórico vs reciente). |
+| **Monitoreo (Administrador)** | `/api/v1/admin/monitoreo/latencia-p95/{tipo_op}` | `GET` | `X-Admin-Token` | Latencia P95 del microservicio y verificación de hashes de artefactos. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/monitoreo/pipeline-ejecuciones` | `GET` | `X-Admin-Token` | Trazabilidad del ETL por lotes en Azure Container Instances (`valuo-etl-job`). |
+| **Monitoreo (Administrador)** | `/api/v1/admin/config/ipc` | `GET` | `X-Admin-Token` | Lectura del factor de deflactación IPC y periodo vigente. |
+| **Monitoreo (Administrador)** | `/api/v1/admin/config/ipc` | `PUT` | `X-Admin-Token` | Modificación en caliente del IPC vigente sin reiniciar el contenedor. |
+| **Monitoreo (Administrador)** | `/api/v1/modelo/info` | `GET` | Pública / Admin | Ficha técnica completa del modelo cargado en memoria RAM (features, versiones, métricas). |
+
+---
+
+## 2. Convenciones Generales de la API
+
+- **Base URL:** `http://localhost:8000` (configurable por variable de entorno `ML_SERVICE_URL`)
+- **Headers Estándar:**
+  ```http
+  Content-Type: application/json
+  X-Admin-Token: <ADMIN_TOKEN_CONFIGURADO>
+  ```
+- **Códigos de Estado HTTP:**
+  - `200 OK`: Consulta o promoción exitosa.
+  - `202 Accepted`: Job de entrenamiento iniciado exitosamente en background.
+  - `401 Unauthorized`: Token de administrador ausente o inválido.
+  - `404 Not Found`: `job_id` o modelo no encontrado.
+  - `409 Conflict`: Ya existe un job de entrenamiento en ejecución.
+  - `422 Unprocessable Entity`: Error de validación de payload JSON.
+  - `503 Service Unavailable`: Modelos no inicializados en memoria.
+
+---
+
+## 3. Módulo 1: Reentrenamiento Asíncrono de Modelos
+
+Prefijo: `/api/v1/admin/entrenamiento`
+
+### 3.0. Especificación de Parámetros de Reentrenamiento (Obligatorios vs Opcionales)
+
+Para lanzar el reentrenamiento, **ningún campo es obligatorio**. El microservicio ya incorpora los hiperparámetros óptimos producto de la calibración de la tesis. Puedes enviar un body vacío `{}` o personalizar cualquiera de los siguientes atributos:
+
+| Campo | Tipo | ¿Obligatorio? | Default (Venta) | Default (Alquiler) | Descripción y Propósito |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| `nombre_modelo` | `string` | **Opcional** | `"xgboost_venta_v1"` | `"xgboost_alquiler_v1"` | Prefijo para nombrar el modelo y los archivos `.pkl` / `.json`. |
+| `max_depth` | `int` | **Opcional** | `6` | `6` | Profundidad máxima de los árboles (evita sobreajuste). |
+| `learning_rate` | `float` | **Opcional** | `0.040` | `0.035` | Tasa de aprendizaje o contracción por árbol. |
+| `n_estimators` | `int` | **Opcional** | `650` | `600` | Número total de estimadores (árboles). |
+| `min_child_weight` | `int` | **Opcional** | `8` | `4` | Peso mínimo requerido en un nodo hoja (Palanca 4: 8 venta / 4 alquiler). |
+| `usar_target_m2` | `bool` | **Opcional** | `true` | `true` | Si es `true`, entrena sobre $\ln(\text{precio}/m^2)$ (reduce sesgos en áreas dispares). |
+| `factor_calibracion`| `float` | **Opcional** | `null` (Automático) | `null` (Automático) | Multiplicador de escala. Si es `null`, calcula calibración estratificada IAAO. |
+| `guardar_como_activo`| `bool` | **Opcional** | `false` | `false` | **Gobernanza Human-in-the-Loop:** Si es `false`, se registra como `Candidate` en MLflow para ser comparado antes de promoverlo. Si es `true`, pasa a producción de inmediato. |
+| `shap_top_n` | `int` | **Opcional** | `10` | `10` | Cantidad de atributos clave a precargar en el explicador de SHAP. |
+| `hiperparametros` | `object` | **Opcional** | Ver ejemplo | Ver ejemplo | Diccionario con regularizaciones finas (`subsample`, `colsample_bytree`, `reg_alpha`, `reg_lambda`). |
+
+> **💡 Compatibilidad con el Backend de Monitoreo (`valuo-monitoring-service`):**  
+> Si tu backend en Spring Boot maneja un payload simplificado como:  
+> ```json
+> {
+>   "operation_type": "VENTA",
+>   "dataset_version": "v2026_Q1",
+>   "target_metric": "MAPE"
+> }
+> ```
+> Simplemente dirígelo a la URL correspondiente (`/venta` o `/alquiler`). Hacia `ml-service` puedes enviar `{}` o reenviar únicamente los hiperparámetros que el administrador haya decidido alterar desde el panel de control.
+
+---
+
+### 3.1. Entrenamiento Inicial (Bootstrap directo a Producción - @champion)
+- **Método / Ruta:** `POST /api/v1/admin/entrenamiento/inicial/{tipo_operacion}`
+- **Parámetro Path:** `tipo_operacion` (`venta` o `alquiler`)
+- **Headers:**
+  ```http
+  Content-Type: application/json
+  X-Admin-Token: <ADMIN_TOKEN_CONFIGURADO>
+  ```
+- **Propósito y Gobernanza:**  
+  Diseñado para el **primer despliegue** o reinicio en frío (*cold-start*) del servicio. En el repositorio de código, los archivos `model_config.json` y `model_alquiler_config.json` se mantienen deliberadamente limpios (`"modelo_archivo": "ninguno"`, `"modelo_version": "ninguno (esperando entrenamiento inicial)"`), sin pre-incluir binarios `.pkl`. Al subir el servicio por primera vez sin modelos, este endpoint:
+  1. Entrena el modelo completo desde la base histórica de PostgreSQL (`dataset_inmuebles_venta` o `alquiler`).
+  2. Registra los artefactos y métricas oficiales en **MLflow Tracking & Model Registry**.
+  3. Promueve **automáticamente** la versión a stage **`Production`** y le asigna el alias **`@champion`**.
+  4. Realiza **Hot-Reload en memoria RAM** (cargando el modelo y el TreeExplainer de SHAP) de manera inmediata (*zero-downtime*).
+  5. Actualiza dinámicamente en disco los archivos `model_config.json` o `model_alquiler_config.json` con la versión, métricas y factor de calibración, permitiendo que ante futuros reinicios del contenedor (`lifespan`), el modelo y sus metadatos se carguen automáticamente en RAM.
+  6. Sube los artefactos a Azure Blob Storage y elimina el binario `.pkl` local del contenedor para mantenerlo liviano (salvo que `PRESERVAR_MODELOS_LOCALES=true` o MLflow esté desconectado, en cuyo caso preserva los `.pkl` locales en disco).
+
+- **Request Body (Opcional — puedes enviar `{}` o personalizar hiperparámetros):**
+```json
+{
+  "nombre_modelo": "xgboost_venta_v1",
+  "max_depth": 6,
+  "learning_rate": 0.040,
+  "n_estimators": 650,
+  "min_child_weight": 8,
+  "factor_calibracion": null
+}
+```
+> **Nota de Configuración:**  
+> - Si se envía `{}` (vacío), el servicio toma automáticamente los hiperparámetros óptimos calibrados en la tesis y asigna el nombre canónico (`xgboost_venta_v1` o `xgboost_alquiler_v1`).  
+> - No incluye el flag `guardar_como_activo` en el payload porque este endpoint **siempre** lo activa como modelo de producción.
+
+- **Respuesta (HTTP 202 Accepted):**
+```json
+{
+  "job_id": "8f3b6151-9c33-4a11-8220-71eb24dd2a15",
+  "tipo_operacion": "venta",
+  "estado": "en_progreso",
+  "nombre_modelo": "xgboost_venta_v1",
+  "iniciado_en": "2026-10-15T12:00:00.000000Z",
+  "mensaje": "Job de entrenamiento inicial (venta) 'xgboost_venta_v1' iniciado. Al finalizar, se guardará en Azure Storage, se registrará como Producción (@champion) y se cargará en memoria RAM automáticamente.",
+  "consultar_estado_en": "/api/v1/admin/entrenamiento/estado/8f3b6151-9c33-4a11-8220-71eb24dd2a15"
+}
+```
+
+---
+
+### 3.2. Iniciar Reentrenamiento de Venta (Genera Candidato)
+- **Método / Ruta:** `POST /api/v1/admin/entrenamiento/venta`
+- **Descripción:** Lanza en segundo plano el pipeline de entrenamiento del modelo de venta sobre `dataset_inmuebles_venta` (PostgreSQL), aplicando target unitario $\ln(P/m^2)$, calibración estratificada IAAO y registro en MLflow.
+- **Request Body (Opcional — todos los campos tienen defaults óptimos validados):**
+```json
+{
+  "nombre_modelo": "xgboost_venta_v1",
+  "max_depth": 6,
+  "learning_rate": 0.040,
+  "n_estimators": 650,
+  "min_child_weight": 9,
+  "usar_target_m2": true,
+  "factor_calibracion": null,
+  "guardar_como_activo": false,
+  "shap_top_n": 10,
+  "hiperparametros": {
+    "subsample": 0.852,
+    "colsample_bytree": 0.847,
+    "reg_alpha": 4.06,
+    "reg_lambda": 0.0306
+  }
+}
+```
+> **Nota sobre `guardar_como_activo`:**
+> - `false` (Recomendado): Se registra como **Candidate** en MLflow para ser comparado en el panel de benchmark antes de promoverse.
+> - `true`: Pasa directamente a producción y reemplaza al modelo activo en RAM al terminar.
+
+- **Respuesta (HTTP 202 Accepted):**
+```json
+{
+  "job_id": "7dea5252-8f22-4f10-9330-80eb14dd1f16",
+  "tipo_operacion": "venta",
+  "estado": "en_progreso",
+  "nombre_modelo": "xgboost_venta_v1",
+  "iniciado_en": "2026-10-06T04:39:41.123456Z",
+  "mensaje": "Job de reentrenamiento de venta 'xgboost_venta_v2' iniciado. El pipeline corre en background y registrará el modelo en MLflow.",
+  "consultar_estado_en": "/api/v1/admin/entrenamiento/estado/7dea5252-8f22-4f10-9330-80eb14dd1f16"
+}
+```
+
+---
+
+### 3.3. Iniciar Reentrenamiento de Alquiler (Genera Candidato)
+- **Método / Ruta:** `POST /api/v1/admin/entrenamiento/alquiler`
+- **Descripción:** Lanza en segundo plano el pipeline de entrenamiento del modelo de alquiler sobre `dataset_inmuebles_alquiler` con ponderación temporal `decay = 0.85`.
+- **Request Body (Opcional):**
+```json
+{
+  "nombre_modelo": "xgboost_alquiler_v1",
+  "max_depth": 6,
+  "learning_rate": 0.035,
+  "n_estimators": 600,
+  "min_child_weight": 4,
+  "usar_target_m2": true,
+  "factor_calibracion": null,
+  "guardar_como_activo": false,
+  "shap_top_n": 10,
+  "hiperparametros": {
+    "subsample": 0.85,
+    "colsample_bytree": 0.80,
+    "reg_alpha": 0.1,
+    "reg_lambda": 4.0
+  }
+}
+```
+
+- **Respuesta (HTTP 202 Accepted):** Idéntica estructura a Venta con `tipo_operacion: "alquiler"`.
+
+---
+
+### 3.4. Consultar Estado y Métricas de un Job (Polling)
+- **Método / Ruta:** `GET /api/v1/admin/entrenamiento/estado/{job_id}`
+- **Descripción:** Consulta el estado actual de un job en ejecución o finalizado.
+- **Respuesta durante ejecución (`en_progreso`):**
+```json
+{
+  "job_id": "7dea5252-8f22-4f10-9330-80eb14dd1f16",
+  "tipo_operacion": "venta",
+  "estado": "en_progreso",
+  "nombre_modelo": "xgboost_venta_v2",
+  "iniciado_en": "2026-10-06T04:39:41.123456Z",
+  "completado_en": null,
+  "duracion_segundos": null,
+  "progreso": "[5/8] Entrenando XGBRegressor (venta, n_estimators=650)...",
+  "metricas": null,
+  "artefactos": null,
+  "mlflow_run_id": null,
+  "mlflow_model_version": null,
+  "estado_gobernanza": "candidate",
+  "error": null
+}
+```
+
+- **Respuesta al finalizar (`completado`):**
+```json
+{
+  "job_id": "7dea5252-8f22-4f10-9330-80eb14dd1f16",
+  "tipo_operacion": "venta",
+  "estado": "completado",
+  "nombre_modelo": "xgboost_venta_v2",
+  "iniciado_en": "2026-10-06T04:39:41.123456Z",
+  "completado_en": "2026-10-06T04:40:15.443456Z",
+  "duracion_segundos": 34.32,
+  "progreso": "[8/8] Entrenamiento de venta completado y registrado como candidato.",
+  "metricas": {
+    "mape_pct": 14.8601,
+    "r2": 0.7477,
+    "mae": 51861.76,
+    "rmse": 78053.38,
+    "cod_pct": 14.20,
+    "cov_pct": 19.73,
+    "prd": 1.0363,
+    "prb": -0.0806,
+    "median_ratio_calibrado": 1.0305,
+    "n_train": 88346,
+    "n_test": 47474,
+    "supera_benchmark": true,
+    "iaao": {
+      "median_ratio": 1.0305,
+      "mean_ratio": 1.0456,
+      "weighted_mean_ratio": 1.0090,
+      "cod_pct": 14.20,
+      "cov_pct": 19.73,
+      "prd": 1.0363,
+      "prb": -0.0806,
+      "cumple_iaao_cod": true,
+      "cumple_iaao_nivel": true,
+      "cumple_iaao_prd": false
+    }
+  },
+  "artefactos": {
+    "modelo_pkl": "models/xgboost_venta_v2.pkl",
+    "params_json": "models/xgboost_venta_v2_params.json",
+    "metricas_json": "models/xgboost_venta_v2_metricas.json",
+    "model_config_json": "config/model_config.json",
+    "modelo_recargado_en_memoria": false,
+    "mlflow_model_uri": "models:/xgboost_venta/8"
+  },
+  "mlflow_run_id": "0ac890d6d1ca45a8b77b977eb96a0cff",
+  "mlflow_model_version": "8",
+  "estado_gobernanza": "candidate",
+  "error": null
+}
+```
+
+---
+
+### 3.5. Consultar Último Job y Disponibilidad
+- **Método / Ruta:** `GET /api/v1/admin/entrenamiento/estado`
+- **Descripción:** Permite saber rápidamente si el servicio está ocupado entrenando o si está disponible para un nuevo job.
+
+### 3.6. Listar Historial de Jobs de la Sesión
+- **Método / Ruta:** `GET /api/v1/admin/entrenamiento/jobs`
+- **Descripción:** Retorna el array de todos los jobs lanzados en la sesión actual de FastAPI.
+
+---
+
+## 4. Módulo 2: Monitoreo, Gobernanza y Benchmarking
+
+Prefijo: `/api/v1/admin/modelos`
+
+### 4.1. Benchmark Comparativo: Producción vs Candidatos
+- **Método / Ruta:** `GET /api/v1/admin/modelos/benchmark/{tipo_operacion}`
+- **Parámetros Path:** `tipo_operacion` (`venta` o `alquiler`)
+- **Query Params (Opcionales):**
+  - `solo_ultimo`: `boolean` (default: `true`). Compara únicamente el candidato activo más reciente frente al modelo en Producción (comparativa limpia 1 a 1).
+  - `version`: `string` (ej: `"8"`). Permite forzar la comparativa de una versión específica frente a Producción.
+- **Descripción:** Compara matemáticamente el modelo actualmente activo en memoria RAM (`Production`) contra el modelo candidato generado por el reentrenamiento en MLflow. Excluye automáticamente versiones históricas en estado `Archived`.
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "tipo_operacion": "venta",
+  "benchmark_referencial_mape": 15.0,
+  "modelo_produccion": {
+    "nombre_modelo": "xgboost_venta",
+    "version": "7",
+    "stage": "Production",
+    "run_id": "0ac890d6d1ca45a8b77b977eb96a0cff",
+    "metricas": {
+      "mape_pct": 14.9845,
+      "r2": 0.7473,
+      "mae": 52121.38,
+      "rmse": 78118.43,
+      "n_train": 44173,
+      "n_test": 23737
+    },
+    "tags": {
+      "autor": "Joaquín Cortez",
+      "target": "precio_soles_const"
+    },
+    "creado_en": "2026-10-06T04:40:00Z",
+    "fuente_artefacto": "models:/xgboost_venta/7"
+  },
+  "candidatos": [
+    {
+      "candidato": {
+        "nombre_modelo": "xgboost_venta",
+        "version": "8",
+        "stage": "Candidate",
+        "run_id": "b1c2d3e4f5a6b7c8d9e0",
+        "metricas": {
+          "mape_pct": 14.1571,
+          "r2": 0.7472,
+          "mae": 50897.93,
+          "rmse": 78128.69,
+          "n_train": 44173,
+          "n_test": 23737
+        },
+        "tags": {
+          "tipo_target": "m2",
+          "calibracion_iaao": "estratificada"
+        },
+        "creado_en": "2026-10-07T12:00:00Z",
+        "fuente_artefacto": "models:/xgboost_venta/8"
+      },
+      "deltas": {
+        "delta_mape_pct": -0.8274,
+        "delta_r2": -0.0001,
+        "delta_mae": -1223.45,
+        "delta_rmse": 10.26,
+        "mejora_mape": true,
+        "mejora_r2": false
+      },
+      "recomendacion": "RECOMENDADO_PARA_PRODUCCION",
+      "motivo": "El candidato mejora el desempeño frente a producción (ΔMAPE: -0.83%, ΔR²: -0.0001) y supera el benchmark exigido (15.0%)."
+    }
+  ],
+  "total_candidatos": 1,
+  "generado_en": "2026-10-12T23:21:13Z"
+}
+```
+
+> **Valores posibles de `recomendacion`:**
+> - `RECOMENDADO_PARA_PRODUCCION`: Supera al modelo en producción y bate los benchmarks.
+> - `NO_RECOMENDADO`: El error MAPE aumentó respecto a la versión en producción.
+> - `REVISION_MANUAL`: Mejoras ambiguas (por ejemplo: menor MAPE pero menor $R^2$).
+
+---
+
+### 4.2. Historial de Versiones en Model Registry
+- **Método / Ruta:** `GET /api/v1/admin/modelos/historial/{tipo_operacion}`
+- **Descripción:** Lista todas las versiones históricas registradas en MLflow con sus etapas (`Production`, `Candidate`, `Archived`), fecha de creación y métricas.
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "tipo_operacion": "venta",
+  "nombre_modelo": "xgboost_venta",
+  "total_versiones": 8,
+  "versiones": [
+    {
+      "nombre_modelo": "xgboost_venta",
+      "version": "8",
+      "stage": "Production",
+      "run_id": "b1c2d3e4f5a6b7c8d9e0",
+      "metricas": {
+        "mape_pct": 14.1571,
+        "r2": 0.7472,
+        "mae": 50897.93,
+        "rmse": 78128.69
+      },
+      "tags": { "experimento": "target_m2_calibrado" },
+      "creado_en": "2026-10-07T12:00:00Z"
+    },
+    {
+      "nombre_modelo": "xgboost_venta",
+      "version": "7",
+      "stage": "Archived",
+      "run_id": "0ac890d6d1ca45a8b77b977eb96a0cff",
+      "metricas": {
+        "mape_pct": 14.9845,
+        "r2": 0.7473,
+        "mae": 52121.38,
+        "rmse": 78118.43
+      },
+      "tags": {},
+      "creado_en": "2026-10-06T04:40:00Z"
+    }
+  ],
+  "generado_en": "2026-10-12T23:22:00Z"
+}
+```
+
+---
+
+### 4.3. Promover Modelo Candidato a Producción (Aprobación Humana)
+- **Método / Ruta:** `POST /api/v1/admin/modelos/promover`
+- **Descripción:** Acción definitiva de gobernanza de MLOps con sincronización total de estado:
+  1. **Transición en MLflow**: Asigna a la versión elegida el stage `Production`, el alias canónico `@champion` y los tags de auditoría.
+  2. **Archivado Automático**: Transiciona explícitamente todas las versiones previas en producción a `Archived` con tag `estado_gobernanza: "archived"`.
+  3. **Resolución Inteligente de Versión**: Si `version` no se envía (o es `null`), resuelve automáticamente el último candidato activo. Soporta `"8"`, `8` o `"v8"`.
+  4. **Hot-Reload Desacoplado en RAM (Proxy HTTP en ~1.5s)**: Descarga el artefacto binario `model.xgb` directamente a través del proxy HTTP de MLflow sin requerir credenciales de Azure Storage en el cliente y lo precarga en memoria RAM.
+  5. **SHAP TreeExplainer en Caliente**: Reconstruye el explicador SHAP en RAM sin reiniciar el servidor (*Zero Downtime*).
+  6. **Sincronización de Gobernanza de Jobs**: Actualiza en tiempo real el registro en memoria (`GET /jobs` y `/estado/{job_id}`), pasando el job correspondiente de `"candidate"` a `"production"`, y los anteriores a `"archived"`.
+  7. **Persistencia para Reinicios**: Guarda la versión promovida en `model_config.json` para que ante cualquier reinicio o cold-start de Azure Container Apps, el modelo se precargue en memoria automáticamente.
+  8. **Cálculo de Deltas**: Retorna la comparativa oficial ($\Delta\text{MAPE}$, $\Delta R^2$, $\Delta\text{MAE}$, $\Delta\text{RMSE}$) frente a la versión archivada.
+- **Request Body (Simplificado — `version` y `motivo` son opcionales):**
+```json
+{
+  "tipo_operacion": "venta",
+  "motivo": "Aprobado por el comité de tasación: MAPE alcanzó 14.16% superando benchmark."
+}
+```
+*(O con versión explícita: `{"tipo_operacion": "venta", "version": "8", "motivo": "..."}`)*.
+
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "exito": true,
+  "mensaje": "Modelo xgboost_venta v8 promovido exitosamente a Producción y cargado en memoria RAM.",
+  "tipo_operacion": "venta",
+  "version_promovida": "8",
+  "version_anterior_archivada": "7",
+  "modelo_cargado_en_ram": true,
+  "metricas": {
+    "mape_pct": 14.1571,
+    "r2": 0.7472,
+    "mae": 50897.93,
+    "rmse": 78128.69,
+    "n_train": 44173,
+    "n_test": 23737
+  },
+  "metricas_anteriores": {
+    "mape_pct": 14.9845,
+    "r2": 0.7473,
+    "mae": 52121.38,
+    "rmse": 78118.43,
+    "n_train": 44173,
+    "n_test": 23737
+  },
+  "deltas": {
+    "delta_mape_pct": -0.8274,
+    "delta_r2": -0.0001,
+    "delta_mae": -1223.45,
+    "delta_rmse": 10.26,
+    "mejora_mape": true,
+    "mejora_r2": false
+  },
+  "promovido_en": "2026-10-13T01:16:44Z"
+}
+```
+
+---
+
+### 4.4. Rollback Preventivo a Versión Archivada
+- **Método / Ruta:** `POST /api/v1/admin/modelos/rollback`
+- **Descripción:** Acción de gobernanza para revertir el modelo en producción ante contingencias o anomalías:
+  1. Si `version` no se especifica, es `null` o viene el placeholder `"string"` de Swagger, **revierte automáticamente a la versión previa archivada más reciente**.
+  2. Si se especifica una versión (`"7"`), restaura esa versión histórica exacta a `Production` y archiva la versión actual.
+  3. Ejecuta Hot-Reload seguro en RAM y reconstruye SHAP en caliente.
+  4. Calcula y retorna el impacto en métricas ($\Delta\text{MAPE}$).
+- **Request Body (Opcional):**
+```json
+{
+  "tipo_operacion": "venta",
+  "motivo": "Reversión preventiva por degradación de ciclo inmobiliario"
+}
+```
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "exito": true,
+  "mensaje": "Modelo xgboost_venta v7 promovido exitosamente a Producción y cargado en memoria RAM.",
+  "tipo_operacion": "venta",
+  "version_promovida": "7",
+  "version_anterior_archivada": "8",
+  "modelo_cargado_en_ram": true,
+  "metricas": {
+    "mape_pct": 14.9845,
+    "r2": 0.7473,
+    "mae": 52121.38,
+    "rmse": 78118.43,
+    "n_train": 44173,
+    "n_test": 23737
+  },
+  "metricas_anteriores": {
+    "mape_pct": 14.1571,
+    "r2": 0.7472,
+    "mae": 50897.93,
+    "rmse": 78128.69,
+    "n_train": 44173,
+    "n_test": 23737
+  },
+  "deltas": {
+    "delta_mape_pct": 0.8274,
+    "delta_r2": 0.0001,
+    "delta_mae": 1223.45,
+    "delta_rmse": -10.26,
+    "mejora_mape": false,
+    "mejora_r2": true
+  },
+  "promovido_en": "2026-10-13T01:16:11Z"
+}
+```
+
+---
+
+### 4.5. Descartar y Archivar Modelo Candidato (Rechazo Humano)
+- **Método / Ruta:** `POST /api/v1/admin/modelos/descartar`
+- **Descripción:** Acción formal de gobernanza MLOps para rechazar y archivar un modelo candidato que no superó los estándares de calidad o benchmark:
+  1. Si `version` se omite, es `null` o `"string"`, **resuelve automáticamente el candidato activo más reciente**. Si se provee una versión (`"8"`), descarta esa versión específica.
+  2. **Protección de Producción:** Si por error se intenta descartar el modelo activo en `Production`, el endpoint rechaza la solicitud con `HTTP 400 Bad Request` indicando que primero debe promoverse otro modelo o ejecutarse un rollback.
+  3. Transiciona la versión en MLflow Model Registry a `stage="Archived"`.
+  4. Estampa los tags de gobernanza: `estado_gobernanza="discarded"`, `motivo_descarte` y timestamp ISO `descartado_en` (tanto en la versión del modelo como en el run de MLflow Tracking).
+  5. **Limpia la cola de Benchmark:** El modelo candidato se excluye automáticamente de las comparativas de `GET /api/v1/admin/modelos/benchmark/{tipo_operacion}`, evitando falsas alertas.
+  6. Sincroniza el registro de jobs en memoria a `estado_gobernanza: "discarded"`.
+- **Request Body:**
+```json
+{
+  "tipo_operacion": "venta",
+  "version": "8",
+  "motivo": "MAPE 18.2% supera el umbral máximo de 15.0% y presenta dispersión IAAO COD > 15."
+}
+```
+- **Respuesta Exitosa (HTTP 200 OK):**
+```json
+{
+  "exito": true,
+  "mensaje": "Modelo candidato xgboost_venta v8 descartado y archivado exitosamente.",
+  "tipo_operacion": "venta",
+  "version_descartada": "8",
+  "nuevo_stage": "Archived",
+  "motivo": "MAPE 18.2% supera el umbral máximo de 15.0% y presenta dispersión IAAO COD > 15.",
+  "metricas": {
+    "mape_pct": 18.214,
+    "r2": 0.6912,
+    "mae": 61240.5,
+    "rmse": 91204.3,
+    "n_train": 44173,
+    "n_test": 23737
+  },
+  "descartado_en": "2026-11-07T12:35:00Z"
+}
+```
+
+---
+
+## 5. Módulo 3: Observabilidad y Metadatos Activos
+
+### 5.1. Health Check Operacional
+- **Método / Ruta:** `GET /health`
+- **Descripción:** Diseñado para *health check probes* de Kubernetes, Nginx o comprobación periódica del backend. Refleja el ciclo de vida del servicio:
+  - **Cold-Start (Antes del entrenamiento inicial):** Retorna `status: "degraded"` indicando que los modelos aún no han sido generados ni cargados en memoria.
+  - **Operativo (Post-entrenamiento inicial o en producción):** Retorna `status: "ok"` cuando ambos modelos (venta y alquiler) están cargados en memoria RAM.
+
+#### Respuesta en Estado Operativo (HTTP 200 OK):
+```json
+{
+  "status": "ok",
+  "modelo_venta": "v2",
+  "modelo_alquiler": "v1",
+  "ipc_periodo": "2026-Q1"
+}
+```
+
+#### Respuesta en Estado Cold-Start / Esperando Entrenamiento Inicial (HTTP 200 OK):
+```json
+{
+  "status": "degraded",
+  "modelo_venta": null,
+  "modelo_alquiler": null,
+  "ipc_periodo": null
+}
+```
+
+---
+
+### 5.2. Información y Metadatos del Modelo en Servicio
+- **Método / Ruta:** `GET /api/v1/modelo/info?tipo_operacion=venta`
+- **Query Params:** `tipo_operacion` (`venta` o `alquiler`, default `venta`)
+- **Descripción:** Retorna el estado completo del modelo que atiende las predicciones en este momento. Si el servicio acaba de desplegarse en frío sin entrenar, responde de forma segura indicando `"ninguno (esperando entrenamiento inicial)"` con métricas en 0.0.
+
+#### Respuesta en Estado Operativo (HTTP 200 OK):
+```json
+{
+  "version": "v2",
+  "archivo": "xgboost_venta_v2.pkl",
+  "metricas": {
+    "mape_pct": 14.8601,
+    "r2": 0.7477,
+    "mae_soles": 51861.76,
+    "rmse_soles": 78053.38,
+    "train_periodo": "2016-2023",
+    "test_periodo": "2024-2025"
+  },
+  "ipc_actual": {
+    "valor": 169.18,
+    "periodo": "2026-Q1",
+    "fuente": "INEI/BCRP — serie PN01270PM, Base Dic 2009 = 100",
+    "nota": "Actualizar este valor al cierre de cada trimestre sin necesidad de redespliegue"
+  },
+  "n_features": 33,
+  "n_distritos": 22,
+  "data_provider": "postgresql",
+  "distritos_disponibles": [
+    "Ate Vitarte",
+    "Barranco",
+    "Bellavista",
+    "Breña",
+    "Carabayllo",
+    "Cercado de Lima",
+    "Chorrillos",
+    "Comas",
+    "Jesús María",
+    "La Molina",
+    "La Perla",
+    "La Victoria",
+    "Lince",
+    "Los Olivos",
+    "Magdalena",
+    "Miraflores",
+    "Pueblo Libre",
+    "San Borja",
+    "San Isidro",
+    "San Miguel",
+    "Surco",
+    "Surquillo"
+  ]
+}
+```
+
+#### Respuesta en Estado Cold-Start (HTTP 200 OK):
+```json
+{
+  "version": "ninguno (esperando entrenamiento inicial)",
+  "archivo": "ninguno",
+  "metricas": {
+    "mape_pct": 0.0,
+    "r2": 0.0,
+    "mae_soles": 0.0,
+    "rmse_soles": 0.0,
+    "train_periodo": "N/A",
+    "test_periodo": "N/A"
+  },
+  "ipc_actual": {
+    "valor": 169.18,
+    "periodo": "2026-Q1",
+    "fuente": "INEI/BCRP",
+    "nota": "Servicio a la espera de entrenamiento inicial."
+  },
+  "n_features": 33,
+  "n_distritos": 22,
+  "data_provider": "postgresql",
+  "distritos_disponibles": [
+    "Ate Vitarte",
+    "Barranco",
+    "Bellavista",
+    "Breña",
+    "Carabayllo",
+    "Cercado de Lima",
+    "Chorrillos",
+    "Comas",
+    "Jesús María",
+    "La Molina",
+    "La Perla",
+    "La Victoria",
+    "Lince",
+    "Los Olivos",
+    "Magdalena",
+    "Miraflores",
+    "Pueblo Libre",
+    "San Borja",
+    "San Isidro",
+    "San Miguel",
+    "Surco",
+    "Surquillo"
+  ]
+}
+```
+
+---
+
+### 5.3. Métricas de Infraestructura (CPU y RAM)
+- **Método / Ruta:** `GET /api/v1/admin/monitoreo/recursos`
+- **Descripción:** Mide el consumo de CPU y memoria RAM del host/contenedor FastAPI en tiempo real para verificar salud de infraestructura.
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "cpu_usage_pct": 12.4,
+  "memory_used_mb": 1420.5,
+  "memory_total_mb": 16384.0,
+  "memory_usage_pct": 8.67,
+  "uptime_seconds": 12450.0,
+  "active_threads": 8,
+  "timestamp": "2026-10-12T23:45:00Z"
+}
+```
+
+---
+
+### 5.4. Detección de Data Drift (Population Stability Index - PSI)
+- **Método / Ruta:** `GET /api/v1/admin/monitoreo/drift/{tipo_operacion}`
+- **Parámetros Path:** `tipo_operacion` (`venta` o `alquiler`)
+- **Descripción:** Evalúa el cambio en la distribución de las variables clave del mercado inmobiliario comparando el ciclo histórico de entrenamiento (2016-2023) contra el ciclo reciente de test (2024-2025).
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "operation_type": "venta",
+  "overall_psi": 0.0482,
+  "drift_status": "STABLE",
+  "baseline_period": "2016-2023",
+  "target_period": "2024-2025",
+  "features": [
+    {
+      "feature_name": "superficie_total",
+      "psi_score": 0.0312,
+      "status": "STABLE",
+      "description": "Distribución de áreas físicas sin alteraciones significativas (PSI < 0.10)."
+    },
+    {
+      "feature_name": "precio_soles_const",
+      "psi_score": 0.0645,
+      "status": "STABLE",
+      "description": "Precios reales deflactados por IPC conservan estabilidad de mercado."
+    },
+    {
+      "feature_name": "antiguedad_anios",
+      "psi_score": 0.0210,
+      "status": "STABLE",
+      "description": "Stock inmobiliario mantiene perfil de antigüedad homogéneo."
+    }
+  ],
+  "message": "Distribución de datos estable (PSI global: 0.0482 < 0.10). No se requiere reentrenamiento urgente.",
+  "evaluated_at": "2026-10-12T23:45:00Z"
+}
+```
+
+---
+
+### 5.5. Fluctuación Temporal del Ciclo de Mercado (MAPE / MAE por Periodo)
+- **Método / Ruta:** `GET /api/v1/admin/monitoreo/fluctuacion-temporal/{tipo_operacion}`
+- **Parámetros Path:** `tipo_operacion` (`venta` o `alquiler`)
+- **Descripción:** Genera la serie de tiempo trimestral/mensual para graficar el MAPE y MAE frente a la cota máxima del 15% en el dashboard de monitoreo.
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "operation_type": "venta",
+  "threshold_mape": 15.0,
+  "time_series": [
+    {
+      "period": "2024-Q1",
+      "mape_pct": 14.32,
+      "mae_soles": 51200.0,
+      "upper_threshold_mape": 15.0,
+      "sample_count": 3200,
+      "exceeds_threshold": false
+    },
+    {
+      "period": "2024-Q2",
+      "mape_pct": 13.98,
+      "mae_soles": 49850.0,
+      "upper_threshold_mape": 15.0,
+      "sample_count": 3450,
+      "exceeds_threshold": false
+    },
+    {
+      "period": "2024-Q3",
+      "mape_pct": 14.16,
+      "mae_soles": 50897.9,
+      "upper_threshold_mape": 15.0,
+      "sample_count": 3610,
+      "exceeds_threshold": false
+    }
+  ],
+  "average_mape": 14.15,
+  "average_mae": 50649.3,
+  "total_evaluated_samples": 10260,
+  "generated_at": "2026-10-12T23:45:00Z"
+}
+```
+
+---
+
+### 5.6. Latencia P95 y Verificación de Artefactos
+- **Método / Ruta:** `GET /api/v1/admin/monitoreo/latencia-p95/{tipo_operacion}`
+- **Parámetros Path:** `tipo_operacion` (`venta` o `alquiler`)
+- **Descripción:** Ejecuta una batería de micro-benchmarks de inferencia para certificar que el percentil 95 (P95) cumpla el SLA (<100ms) y valida la integridad de los artefactos `.pkl` y `.json`.
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "operation_type": "venta",
+  "model_version": "v8_mlflow",
+  "p50_latency_ms": 14.2,
+  "p95_latency_ms": 28.6,
+  "p99_latency_ms": 42.1,
+  "sla_threshold_ms": 100.0,
+  "meets_sla": true,
+  "sample_inferences": 100,
+  "artifacts_status": {
+    "modelo_pkl": true,
+    "metricas_json": true,
+    "params_json": true,
+    "config_json": true
+  },
+  "all_artifacts_ready": true,
+  "measured_at": "2026-10-12T23:45:00Z"
+}
+```
+
+---
+
+### 5.7. Gestión Dinámica del Factor IPC (Actualización en Caliente — Zero Downtime)
+
+El modelo de Machine Learning predice en **Soles Constantes (Base Dic-2009=100)** para aislar la inflación de la plusvalía inmobiliaria real. Para presentar el precio en **Soles Nominales de hoy**, se multiplica por el factor de conversión ($\text{IPC} / 100$). Estos endpoints permiten consultar y actualizar el factor macroeconómico en tiempo real sin reiniciar el microservicio ni reentrenar el modelo.
+
+#### A. Consultar Factor IPC Vigente
+- **Método / Ruta:** `GET /api/v1/admin/config/ipc`
+- **Descripción:** Retorna el factor IPC activo en memoria RAM, el desglose para venta y alquiler, y la fundamentación econométrica.
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "ipc_vigente": {
+    "valor": 169.18,
+    "factor": 1.6918,
+    "periodo": "2026-Q1",
+    "fuente": "INEI/BCRP — serie PN01270PM, Base Dic 2009 = 100",
+    "nota": "Actualizar este valor al cierre de cada trimestre sin necesidad de redespliegue",
+    "fecha_actualizacion": "2026-08-01T00:00:00Z"
+  },
+  "modelo_venta": {
+    "valor": 169.18,
+    "periodo": "2026-Q1",
+    "fuente": "INEI/BCRP — serie PN01270PM, Base Dic 2009 = 100",
+    "nota": "Actualizar este valor al cierre de cada trimestre sin necesidad de redespliegue"
+  },
+  "modelo_alquiler": {
+    "valor": 169.18,
+    "periodo": "2026-Q1",
+    "fuente": "INEI/BCRP - serie PN01270PM, Base Dic 2009 = 100",
+    "nota": "Actualizar este valor al cierre de cada trimestre sin necesidad de redespliegue"
+  },
+  "explicacion_macroeconomica": "Los modelos predictivos (XGBoost) entrenan y evalúan sobre Soles Constantes (Base Dic-2009=100) para aislar la inflación de la plusvalía física y distrital. El factor IPC (valor/100) convierte dicho valor intrínseco en Soles Nominales vigentes para el usuario final."
+}
+```
+
+#### B. Actualizar Factor IPC en Caliente
+- **Método / Ruta:** `PUT /api/v1/admin/config/ipc`
+- **Descripción:**
+  1. Aplica el nuevo factor en la **memoria RAM** de `ml-service` de inmediato (*Zero Downtime*). A partir de ese momento, todas las nuevas inferencias nominales usan el nuevo valor.
+  2. Persiste la configuración en `config/model_config.json` y `config/model_alquiler_config.json`.
+  3. Registra una nueva línea en la bitácora de auditoría macroeconómica `config/ipc_changelog.md`.
+- **Request Body:**
+```json
+{
+  "valor": 169.50,
+  "periodo": "2026-Q2",
+  "fuente": "INEI/BCRP — serie PN01270PM, Base Dic 2009 = 100",
+  "actualizado_por": "Joaquín Cortez",
+  "nota": "Ajuste trimestral por publicación oficial del BCRP para 2026-Q2",
+  "aplicar_a": "ambos"
+}
+```
+*(Valores de `aplicar_a`: `"ambos"`, `"venta"`, `"alquiler"`).*
+
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "exito": true,
+  "mensaje": "Factor IPC actualizado exitosamente a 169.5 (2026-Q2) para: venta, alquiler. Inferencia nominal actualizada en caliente.",
+  "ipc_previo": {
+    "valor": 169.18,
+    "periodo": "2026-Q1",
+    "fuente": "INEI/BCRP — serie PN01270PM, Base Dic 2009 = 100"
+  },
+  "ipc_nuevo": {
+    "valor": 169.5,
+    "factor": 1.695,
+    "periodo": "2026-Q2",
+    "fuente": "INEI/BCRP — serie PN01270PM, Base Dic 2009 = 100",
+    "nota": "Ajuste trimestral por publicación oficial del BCRP para 2026-Q2",
+    "fecha_actualizacion": "2026-10-13T17:15:03.637364"
+  },
+  "modelos_actualizados": [
+    "venta",
+    "alquiler"
+  ],
+  "recargado_en_ram": true,
+  "persistencia_disco": true
+}
+```
+
+---
+
+### 5.8. Historial y Estado del Pipeline ETL (db_dataset_valuo)
+- **Método / Ruta:** `GET /api/v1/admin/monitoreo/pipeline-ejecuciones`
+- **Query Params:**
+  - `limit`: `int` (Opcional, default: `50`, máx: `200`). Cantidad de ejecuciones recientes a retornar.
+- **Headers:**
+  ```http
+  X-Admin-Token: <ADMIN_TOKEN_CONFIGURADO>
+  ```
+- **Descripción:**  
+  Permite al backend de monitoreo y al administrador supervisar la salud del pipeline ETL de ingesta de datos consultando directamente la tabla `public.pipeline_ejecuciones` de PostgreSQL (`db_dataset_valuo`).  
+  Supervisa registros leídos, guardados limpios, descartados por filtros de calidad, duración en segundos, tasa de efectividad porcentual y excepciones antes de ejecutar reentrenamientos.
+
+- **Respuesta (HTTP 200 OK):**
+```json
+{
+  "total_ejecuciones": 12,
+  "ultima_ejecucion": "2026-10-15T08:30:00Z",
+  "tasa_exito_pct": 100.0,
+  "ejecuciones": [
+    {
+      "id": 12,
+      "tipo_ejecucion": "programada",
+      "ejecutado_por": "airflow_scheduler",
+      "iniciado_en": "2026-10-15T08:15:00Z",
+      "finalizado_en": "2026-10-15T08:30:00Z",
+      "duracion_segundos": 900.0,
+      "registros_leidos": 45200,
+      "registros_guardados": 42150,
+      "registros_filtrados": 3050,
+      "tasa_efectividad_pct": 93.25,
+      "estado": "COMPLETADO",
+      "observaciones": "Ingesta y limpieza de propiedades Q1-2026 completada sin anomalías",
+      "errores": null,
+      "metricas_salida": {
+        "outliers_removidos": 120,
+        "cobertura_distrital": 22
+      }
+    }
+  ],
+  "consultado_en": "2026-10-15T12:00:00Z"
+}
+```
+
+---
+
+
+---
+
+### 5.9. Catálogo de Distritos Homologados (Dropdown del Formulario de Predicción)
+
+- **Método / Ruta:** `GET /api/v1/distritos`
+- **Rol / Consumidor:** **Microservicio de Predicción (`valuo-prediction-service`) y Frontend de Usuario Final**
+- **Seguridad:** Pública (No requiere `X-Admin-Token`).
+- **Propósito:** Retorna la lista oficial de los 22 distritos de Lima Metropolitana soportados activamente por el pipeline analítico y el modelo de Machine Learning. El frontend o el microservicio de predicción debe invocar este endpoint para poblar el `<select>` del formulario de tasación inmobiliaria y validar que el distrito ingresado sea idéntico (case-sensitive) a la codificación de entrenamiento.
+
+#### Response (HTTP 200 OK):
+```json
+{
+  "distritos": [
+    "Ate Vitarte",
+    "Barranco",
+    "Bellavista",
+    "Breña",
+    "Carabayllo",
+    "Cercado de Lima",
+    "Chorrillos",
+    "Comas",
+    "Jesús María",
+    "La Molina",
+    "La Perla",
+    "La Victoria",
+    "Lince",
+    "Los Olivos",
+    "Magdalena",
+    "Miraflores",
+    "Pueblo Libre",
+    "San Borja",
+    "San Isidro",
+    "San Miguel",
+    "Surco",
+    "Surquillo"
+  ],
+  "total": 22
+}
+```
+
+#### DTO Java / Spring Boot:
+```java
+public record DistritosResponseDTO(
+    @JsonProperty("distritos") List<String> distritos,
+    @JsonProperty("total") Integer total
+) {}
+```
+
+
+## 6. Diccionario de Métricas Oficiales: ML Clásico vs Normas IAAO
+
+Para construir la interfaz y la lógica de validación en el Backend, este es el significado exacto de las métricas generadas:
+
+| Categoría | Métrica en JSON | Rango / Umbral Objetivo | Interpretación Técnica en Tasación |
+| :--- | :--- | :---: | :--- |
+| **Error Relativo** | `mape_pct` | $\le 15.0\%$ (Venta)<br>$\le 17.89\%$ (Alquiler) | Porcentaje promedio de desviación absoluta sobre el valor real. Venta actual: **14.86%**, Alquiler actual: **13.68%**. |
+| **Ajuste Global** | `r2` | $\ge 0.70$ (Venta)<br>$\ge 0.65$ (Alquiler) | Varianza de los precios de mercado explicada por las features físicas y de entorno. Venta actual: **0.7477**, Alquiler actual: **0.6761**. |
+| **Error Escalar** | `mae` / `rmse` | Menor es mejor | Error en Soles constantes (sin inflación). MAE penaliza linealmente; RMSE penaliza cuadráticamente grandes desvíos. Venta: MAE S/ 51,861.76 / RMSE S/ 78,053.38; Alquiler: MAE S/ 235.28 / RMSE S/ 361.10. |
+| **Nivel IAAO** | `median_ratio` | **`0.90 – 1.10`** (Ideal: 1.00) | Mediana del cociente $\frac{\text{Predicho}}{\text{Real}}$. Con calibración estratificada, se ubica en **1.0305** (Venta) y **0.9900** (Alquiler) ✅. |
+| **Dispersión IAAO** | `cod_pct` | **`5.0% – 15.0%`** | Coeficiente de Dispersión (COD). Mide la equidad horizontal (dispersión de errores respecto a la mediana). Venta: **14.20%** ✅, Alquiler: **13.79%** ✅. |
+| **Variación IAAO**| `cov_pct` | $\le 20.0\%$ | Coeficiente de variación paramétrico basado en desviación estándar de ratios. Venta: **19.73%** ✅, Alquiler: **19.74%** ✅. |
+| **Equidad Vertical**| `prd` | **`0.98 – 1.03`** (Ideal: 1.00) | Diferencial Relacionado con el Precio (*Price-Related Differential*). Venta: **1.0363**, Alquiler: **1.0387**. |
+| **Sesgo de Precio** | `prb` | **`-0.05 a +0.05`** | Sesgo Relacionado con el Precio (*Price-Related Bias*). Regresión del ratio sobre el logaritmo del precio. Venta: **-0.0806**, Alquiler: **-0.1233**. |
+
+---
+
+## 7. Recomendaciones para el Backend de Monitoreo (Spring Boot / NestJS)
+
+### 7.1. Separación Conceptual: MLflow Model Registry vs Historial de Auditoría
+
+Es fundamental distinguir los dos tipos de historiales en la arquitectura MLOps:
+
+1. **Historial Técnico de Modelos (MLflow Tracking & Registry):**
+   - **Endpoint:** `GET /api/v1/admin/modelos/historial/{tipo_operacion}`
+   - **Propósito:** Registro técnico e inmutable de los artefactos (`.pkl`), tags, hiperparámetros, métricas matemáticas de evaluación y etapas del ciclo de vida (`Production`, `Candidate`, `Archived`).
+   - **Almacenamiento:** Administrado por el servidor de MLflow en PostgreSQL (`mlops.model_versions`).
+
+2. **Historial de Auditoría y Gobernanza de Negocio (Backend de Monitoreo):**
+   - **Propósito:** Trazabilidad de las decisiones operacionales humanas (quién autorizó un pase a producción, cuándo se ejecutó un rollback preventivo, qué justificación se ingresó y cuál fue el impacto en $\Delta\text{MAPE}$).
+   - **Almacenamiento:** Tabla relacional en la base de datos operacional (`db_operacional_valuo` / esquema `monitoring`).
+
+```sql
+CREATE TABLE monitoring.governance_audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    action_type VARCHAR(30) NOT NULL, -- 'TRAINING_TRIGGERED', 'MODEL_PROMOTED', 'MODEL_ROLLED_BACK'
+    operation_type VARCHAR(20) NOT NULL, -- 'VENTA' | 'ALQUILER'
+    from_version VARCHAR(20),            -- Versión antes del evento (ej: '7')
+    to_version VARCHAR(20),              -- Versión resultante (ej: '8')
+    delta_mape_pct NUMERIC(6,4),         -- Impacto en error MAPE (ej: -0.8274)
+    reason TEXT,                         -- Justificación ingresada por el usuario
+    triggered_by VARCHAR(100),           -- Usuario / Admin responsable (email o username)
+    status VARCHAR(20) NOT NULL,         -- 'SUCCESS', 'FAILED'
+    metadata JSONB,                      -- Objeto JSON con deltas y métricas completas
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+```
+
+---
+
+### 7.2. DTOs y Registros Java para Spring Boot
+
+Copia y pega estas definiciones en tu proyecto `valuo-monitoring-service`:
+
+```java
+package pe.ventage.valuo_monitoring_service.infrastructure.client.dto;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
+
+// 1. Reentrenamiento
+public record IniciarEntrenamientoRequest(
+    @JsonProperty("nombre_modelo") String nombreModelo,       // Opcional
+    @JsonProperty("guardar_como_activo") Boolean guardarComoActivo, // default false
+    @JsonProperty("max_depth") Integer maxDepth,             // Opcional
+    @JsonProperty("learning_rate") Double learningRate,       // Opcional
+    @JsonProperty("n_estimators") Integer nEstimators,       // Opcional
+    @JsonProperty("usar_target_m2") Boolean usarTargetM2     // Opcional
+) {}
+
+public record JobEstadoResponse(
+    @JsonProperty("job_id") String jobId,
+    @JsonProperty("tipo_operacion") String tipoOperacion,
+    @JsonProperty("estado") String estado, // "en_progreso", "completado", "fallido"
+    @JsonProperty("progreso") String progreso,
+    @JsonProperty("duracion_segundos") Double duracionSegundos,
+    @JsonProperty("mlflow_run_id") String mlflowRunId,
+    @JsonProperty("mlflow_model_version") String mlflowModelVersion,
+    @JsonProperty("metricas") Map<String, Object> metricas,
+    @JsonProperty("error") String error
+) {}
+
+// 2. Gobernanza: Promover, Rollback y Descartar
+public record PromocionModeloRequest(
+    @JsonProperty("tipo_operacion") String tipoOperacion, // "venta" | "alquiler"
+    @JsonProperty("version") String version,             // Opcional (null = auto último candidato)
+    @JsonProperty("motivo") String motivo                // Opcional
+) {}
+
+public record RollbackModeloRequest(
+    @JsonProperty("tipo_operacion") String tipoOperacion, // "venta" | "alquiler"
+    @JsonProperty("version") String version,             // Opcional (null = auto última versión archivada)
+    @JsonProperty("motivo") String motivo                // Opcional
+) {}
+
+public record DescartarModeloRequest(
+    @JsonProperty("tipo_operacion") String tipoOperacion, // "venta" | "alquiler"
+    @JsonProperty("version") String version,             // Opcional (null = auto último candidato)
+    @JsonProperty("motivo") String motivo                // Justificación del descarte
+) {}
+
+public record DescartarModeloResponse(
+    @JsonProperty("exito") Boolean exito,
+    @JsonProperty("mensaje") String mensaje,
+    @JsonProperty("tipo_operacion") String tipoOperacion,
+    @JsonProperty("version_descartada") String versionDescartada,
+    @JsonProperty("nuevo_stage") String nuevoStage,
+    @JsonProperty("motivo") String motivo,
+    @JsonProperty("metricas") MetricasSummaryDTO metricas,
+    @JsonProperty("descartado_en") OffsetDateTime descartadoEn
+) {}
+
+public record PromocionModeloResponse(
+    @JsonProperty("exito") Boolean exito,
+    @JsonProperty("mensaje") String mensaje,
+    @JsonProperty("tipo_operacion") String tipoOperacion,
+    @JsonProperty("version_promovida") String versionPromovida,
+    @JsonProperty("version_anterior_archivada") String versionAnteriorArchivada,
+    @JsonProperty("modelo_cargado_en_ram") Boolean modeloCargadoEnRam,
+    @JsonProperty("metricas") MetricasSummaryDTO metricas,
+    @JsonProperty("metricas_anteriores") MetricasSummaryDTO metricasAnteriores,
+    @JsonProperty("deltas") DeltasMetricasDTO deltas,
+    @JsonProperty("promovido_en") OffsetDateTime promovidoEn
+) {}
+
+public record MetricasSummaryDTO(
+    @JsonProperty("mape_pct") Double mapePct,
+    @JsonProperty("r2") Double r2,
+    @JsonProperty("mae") Double mae,
+    @JsonProperty("rmse") Double rmse,
+    @JsonProperty("n_train") Integer nTrain,
+    @JsonProperty("n_test") Integer nTest
+) {}
+
+public record DeltasMetricasDTO(
+    @JsonProperty("delta_mape_pct") Double deltaMapePct, // Negativo = Error redujo (Mejora)
+    @JsonProperty("delta_r2") Double deltaR2,
+    @JsonProperty("delta_mae") Double deltaMae,
+    @JsonProperty("delta_rmse") Double deltaRmse,
+    @JsonProperty("mejora_mape") Boolean mejoraMape,
+    @JsonProperty("mejora_r2") Boolean mejoraR2
+) {}
+
+// 3. Benchmark Comparativo
+public record BenchmarkResponse(
+    @JsonProperty("tipo_operacion") String tipoOperacion,
+    @JsonProperty("benchmark_referencial_mape") Double benchmarkReferencialMape,
+    @JsonProperty("modelo_produccion") ModeloDetalleDTO modeloProduccion,
+    @JsonProperty("candidatos") List<CandidatoComparacionDTO> candidatos,
+    @JsonProperty("total_candidatos") Integer totalCandidatos,
+    @JsonProperty("generado_en") OffsetDateTime generadoEn
+) {}
+
+public record CandidatoComparacionDTO(
+    @JsonProperty("candidato") ModeloDetalleDTO candidato,
+    @JsonProperty("deltas") DeltasMetricasDTO deltas,
+    @JsonProperty("recomendacion") String recomendacion, // "RECOMENDADO_PARA_PRODUCCION", "NO_RECOMENDADO", etc.
+    @JsonProperty("motivo") String motivo
+) {}
+
+public record ModeloDetalleDTO(
+    @JsonProperty("nombre_modelo") String nombreModelo,
+    @JsonProperty("version") String version,
+    @JsonProperty("stage") String stage,
+    @JsonProperty("run_id") String runId,
+    @JsonProperty("metricas") MetricasSummaryDTO metricas,
+    @JsonProperty("creado_en") String creadoEn
+) {}
+
+// 4. Gestión Dinámica del Factor IPC
+public record ActualizarIPCRequestDTO(
+    @JsonProperty("valor") Double valor,           // ej: 169.50
+    @JsonProperty("periodo") String periodo,       // ej: "2026-Q2"
+    @JsonProperty("fuente") String fuente,         // Opcional
+    @JsonProperty("actualizado_por") String actualizadoPor, // ej: "Admin"
+    @JsonProperty("nota") String nota,             // Opcional
+    @JsonProperty("aplicar_a") String aplicarA     // "ambos" | "venta" | "alquiler"
+) {}
+
+public record ActualizarIPCResponseDTO(
+    @JsonProperty("exito") Boolean exito,
+    @JsonProperty("mensaje") String mensaje,
+    @JsonProperty("ipc_previo") Map<String, Object> ipcPrevio,
+    @JsonProperty("ipc_nuevo") IPCDetalleDTO ipcNuevo,
+    @JsonProperty("modelos_actualizados") List<String> modelosActualizados,
+    @JsonProperty("recargado_en_ram") Boolean recargadoEnRam,
+    @JsonProperty("persistencia_disco") Boolean persistenciaDisco
+) {}
+
+public record IPCDetalleDTO(
+    @JsonProperty("valor") Double valor,
+    @JsonProperty("factor") Double factor,         // valor / 100
+    @JsonProperty("periodo") String periodo,
+    @JsonProperty("fuente") String fuente,
+    @JsonProperty("nota") String nota,
+    @JsonProperty("fecha_actualizacion") String fechaActualizacion
+) {}
+```
+
+---
+
+### 7.3. Estrategia de Polling de Reentrenamiento en Spring Boot
+1. Al recibir `job_id` de `POST /api/v1/admin/entrenamiento/{venta|alquiler}`, persistir en `model_training_jobs` con `status = 'IN_PROGRESS'`.
+2. Lanzar un scheduled executor o tarea periódica cada **3 a 5 segundos** consultando `GET /api/v1/admin/entrenamiento/estado/{job_id}`.
+3. Timeout de seguridad: **120 segundos** (el job habitual toma ~35s).
+4. Al detectar `estado === 'completado'`, actualizar la entidad con las métricas finales y `status = 'COMPLETED'`.
+5. Si `estado === 'fallido'`, almacenar el mensaje de error y marcar `status = 'FAILED'`.
+
+---
+
+### 7.4. Contratos de Inferencia en Tiempo Real y Explicabilidad SHAP (`POST /api/v1/prediccion/venta` y `/alquiler`)
+
+Para la tasación de inmuebles en tiempo real y la explicabilidad del precio, el microservicio recibe las características del inmueble y retorna:
+1. **Valores Predichos:** En Soles Constantes (desestacionalizados de inflación) y Soles Nominales (moneda actual con IPC).
+2. **Intervalo de Confianza:** Rango estadístico calculado sobre el error residual del modelo (± MAPE).
+3. **Explicabilidad SHAP:** Las **33 variables completas** ordenadas por impacto (`|shap_value|` descendente), normalizadas al 100%.
+4. **Muestras Comparables RNTP:** Los 3 testigos directos de mercado y el bloque de homologación pericial según el Art. 3 del Reglamento Nacional de Tasaciones del Perú.
+
+#### A. JSON de Petición (Request Body)
+Tanto para `/api/v1/prediccion/venta` como para `/api/v1/prediccion/alquiler`:
+
+```json
+{
+  "distrito": "San Miguel",
+  "superficie": 75.0,
+  "habitaciones": 3,
+  "banios": 2.0,
+  "garajes": 1,
+  "piso": 5,
+  "antiguedad": 8,
+  "vista_exterior": true,
+  "anio": 2026,
+  "trimestre": 1
+}
+```
+> **Nota:** Los campos `anio` y `trimestre` son opcionales; si no se envían, el microservicio toma automáticamente el año y trimestre en curso.
+
+---
+
+#### B. JSON de Respuesta (Response Body - Venta)
+`POST /api/v1/prediccion/venta` (HTTP 200 OK):
+
+```json
+{
+  "distrito": "San Miguel",
+  "superficie_m2": 75.0,
+  "prediccion": {
+    "soles_constantes": 287000.0,
+    "soles_nominales": 485416.0,
+    "precio_m2_constantes": 3826.67,
+    "precio_m2_nominales": 6472.21
+  },
+  "intervalo_confianza": {
+    "inferior_nominales": 412000.0,
+    "superior_nominales": 558000.0,
+    "inferior_constantes": 243780.0,
+    "superior_constantes": 330220.0,
+    "mape_pct": 14.86
+  },
+  "explicabilidad": {
+    "valor_base_constantes": 432295.69,
+    "contribuciones": [
+      {
+        "feature": "Superficie",
+        "label": "Superficie (75.0 m²)",
+        "shap_value": 0.312,
+        "valor_feature": 75.0,
+        "impacto": "positivo",
+        "peso_porcentaje": 28.2,
+        "nivel_impacto": "Impacto Muy Alto"
+      },
+      {
+        "feature": "distrito_encoded",
+        "label": "Distrito (San Miguel)",
+        "shap_value": -0.198,
+        "valor_feature": 287982.23,
+        "impacto": "negativo",
+        "peso_porcentaje": 22.4,
+        "nivel_impacto": "Impacto Muy Alto"
+      },
+      {
+        "feature": "estrato_socioeconomico",
+        "label": "Estrato Socioeconómico de la Zona (NSE)",
+        "shap_value": 0.065,
+        "valor_feature": 53.586,
+        "impacto": "positivo",
+        "peso_porcentaje": 16.8,
+        "nivel_impacto": "Impacto Alto"
+      },
+      {
+        "feature": "Antiguedad",
+        "label": "Antigüedad (8 años)",
+        "shap_value": -0.105,
+        "valor_feature": 8.0,
+        "impacto": "negativo",
+        "peso_porcentaje": 9.5,
+        "nivel_impacto": "Impacto Moderado"
+      }
+    ],
+    "n_features_mostradas": 29,
+    "n_features_total": 33,
+    "nota": "Los shap_values están en escala logarítmica (transformación log1p del target). 'peso_porcentaje' suma exactamente 100.0% entre la totalidad de variables del modelo."
+  },
+  "modelo": {
+    "version": "v2",
+    "mape_test": 14.8601,
+    "r2_test": 0.7477,
+    "ipc_factor": 169.18,
+    "periodo_ipc": "2026-Q1",
+    "train_periodo": "2016-2023",
+    "test_periodo": "2024-2025"
+  },
+  "alerta_contexto": null,
+  "comparables_rntp": [
+    {
+      "posicion": 1,
+      "distrito": "San Miguel",
+      "es_mismo_distrito": true,
+      "zona_homogenea": "LIMA_MODERNA",
+      "superficie_m2": 75.0,
+      "habitaciones": 3,
+      "banios": 2.0,
+      "garajes": 1,
+      "piso": 5,
+      "antiguedad_anios": 8,
+      "precio_total_pen": 482873.01,
+      "precio_m2_pen": 6438.31,
+      "periodo_muestra": "2025-Q2",
+      "indice_similitud_pct": 100.0,
+      "diferencias": {
+        "dif_superficie_m2": 0.0,
+        "dif_habitaciones": 0,
+        "dif_banios": 0.0,
+        "dif_antiguedad_anios": 0,
+        "dif_piso": 0
+      }
+    },
+    {
+      "posicion": 2,
+      "distrito": "San Miguel",
+      "es_mismo_distrito": true,
+      "zona_homogenea": "LIMA_MODERNA",
+      "superficie_m2": 72.0,
+      "habitaciones": 3,
+      "banios": 2.0,
+      "garajes": 1,
+      "piso": 4,
+      "antiguedad_anios": 10,
+      "precio_total_pen": 465200.0,
+      "precio_m2_pen": 6461.11,
+      "periodo_muestra": "2025-Q1",
+      "indice_similitud_pct": 96.5,
+      "diferencias": {
+        "dif_superficie_m2": -3.0,
+        "dif_habitaciones": 0,
+        "dif_banios": 0.0,
+        "dif_antiguedad_anios": 2,
+        "dif_piso": -1
+      }
+    },
+    {
+      "posicion": 3,
+      "distrito": "San Miguel",
+      "es_mismo_distrito": true,
+      "zona_homogenea": "LIMA_MODERNA",
+      "superficie_m2": 80.0,
+      "habitaciones": 3,
+      "banios": 2.0,
+      "garajes": 1,
+      "piso": 6,
+      "antiguedad_anios": 6,
+      "precio_total_pen": 512000.0,
+      "precio_m2_pen": 6400.0,
+      "periodo_muestra": "2025-Q2",
+      "indice_similitud_pct": 94.8,
+      "diferencias": {
+        "dif_superficie_m2": 5.0,
+        "dif_habitaciones": 0,
+        "dif_banios": 0.0,
+        "dif_antiguedad_anios": -2,
+        "dif_piso": 1
+      }
+    }
+  ],
+  "resumen_rntp": {
+    "cantidad_muestras": 3,
+    "precio_promedio_pen": 486691.0,
+    "precio_m2_promedio_pen": 6433.14,
+    "desviacion_vs_prediccion_pct": 0.26,
+    "cumple_regla_tres_muestras": true,
+    "criterio_busqueda": "Mismo distrito",
+    "advertencia": null
+  }
+}
+```
+
+---
+
+#### C. JSON de Respuesta (Response Body - Alquiler)
+`POST /api/v1/prediccion/alquiler` (HTTP 200 OK):
+
+```json
+{
+  "distrito": "Miraflores",
+  "superficie_m2": 90.0,
+  "prediccion": {
+    "soles_constantes": 2150.0,
+    "soles_nominales": 3637.37,
+    "precio_m2_constantes": 23.89,
+    "precio_m2_nominales": 40.42
+  },
+  "intervalo_confianza": {
+    "inferior_nominales": 3133.6,
+    "superior_nominales": 4141.14,
+    "inferior_constantes": 1852.23,
+    "superior_constantes": 2447.77,
+    "mape_pct": 13.68
+  },
+  "explicabilidad": {
+    "valor_base_constantes": 2680.5,
+    "contribuciones": [
+      {
+        "feature": "distrito_encoded",
+        "label": "Distrito (Miraflores)",
+        "shap_value": 0.285,
+        "valor_feature": 3410.2,
+        "impacto": "positivo",
+        "peso_porcentaje": 35.8,
+        "nivel_impacto": "Impacto Muy Alto"
+      },
+      {
+        "feature": "estrato_socioeconomico",
+        "label": "Estrato Socioeconómico de la Zona (NSE)",
+        "shap_value": 0.0837,
+        "valor_feature": 53.586,
+        "impacto": "positivo",
+        "peso_porcentaje": 17.3,
+        "nivel_impacto": "Impacto Alto"
+      },
+      {
+        "feature": "Superficie",
+        "label": "Superficie (90.0 m²)",
+        "shap_value": 0.21,
+        "valor_feature": 90.0,
+        "impacto": "positivo",
+        "peso_porcentaje": 26.4,
+        "nivel_impacto": "Impacto Alto"
+      }
+    ],
+    "n_features_mostradas": 29,
+    "n_features_total": 33,
+    "nota": "Los shap_values están en escala logarítmica (transformación log1p del target). 'peso_porcentaje' suma exactamente 100.0% entre la totalidad de variables del modelo."
+  },
+  "modelo": {
+    "version": "v1",
+    "mape_test": 13.6811,
+    "r2_test": 0.6761,
+    "ipc_factor": 169.18,
+    "periodo_ipc": "2026-Q1",
+    "train_periodo": "2016-2023",
+    "test_periodo": "2024-2025"
+  },
+  "alerta_contexto": null,
+  "comparables_rntp": [
+    {
+      "posicion": 1,
+      "distrito": "Miraflores",
+      "es_mismo_distrito": true,
+      "zona_homogenea": "LIMA_TOP",
+      "superficie_m2": 90.0,
+      "habitaciones": 3,
+      "banios": 2.0,
+      "garajes": 1,
+      "piso": 7,
+      "antiguedad_anios": 5,
+      "precio_total_pen": 3600.0,
+      "precio_m2_pen": 40.0,
+      "periodo_muestra": "2025-Q2",
+      "indice_similitud_pct": 98.2,
+      "diferencias": {
+        "dif_superficie_m2": 0.0,
+        "dif_habitaciones": 0,
+        "dif_banios": 0.0,
+        "dif_antiguedad_anios": -3,
+        "dif_piso": 2
+      }
+    }
+  ],
+  "resumen_rntp": {
+    "cantidad_muestras": 3,
+    "precio_promedio_pen": 3625.0,
+    "precio_m2_promedio_pen": 40.28,
+    "desviacion_vs_prediccion_pct": 0.34,
+    "cumple_regla_tres_muestras": true,
+    "criterio_busqueda": "Mismo distrito",
+    "advertencia": null
+  }
+}
+```
+
+---
+
+#### D. Regla de las Tres (3) Muestras Comparables de Mercado (RNTP Art. 3) y Resumen Estadístico
+
+Tanto `POST /api/v1/prediccion/venta` como `POST /api/v1/prediccion/alquiler` retornan automáticamente los bloques `comparables_rntp` y `resumen_rntp` para cumplimiento normativo del **Reglamento Nacional de Tasaciones del Perú (RNTP)**:
+
+```json
+{
+  "comparables_rntp": [
+    {
+      "posicion": 1,
+      "distrito": "San Miguel",
+      "es_mismo_distrito": true,
+      "zona_homogenea": "LIMA_MODERNA",
+      "superficie_m2": 75.0,
+      "habitaciones": 3,
+      "banios": 2.0,
+      "garajes": 1,
+      "piso": 5,
+      "antiguedad_anios": 8,
+      "precio_total_pen": 482873.01,
+      "precio_m2_pen": 6438.31,
+      "periodo_muestra": "2025-Q2",
+      "indice_similitud_pct": 100.0,
+      "diferencias": {
+        "dif_superficie_m2": 0.0,
+        "dif_habitaciones": 0,
+        "dif_banios": 0.0,
+        "dif_antiguedad_anios": 0,
+        "dif_piso": 0
+      }
+    }
+  ],
+  "resumen_rntp": {
+    "cantidad_muestras": 3,
+    "precio_promedio_pen": 486691.0,
+    "precio_m2_promedio_pen": 6433.14,
+    "desviacion_vs_prediccion_pct": 0.26,
+    "cumple_regla_tres_muestras": true,
+    "criterio_busqueda": "Mismo distrito",
+    "advertencia": null
+  }
+}
+```
+
+- **Latencia:** Sub-milisegundo (< 0.5 ms) gracias al pre-cálculo de índices Numpy en memoria RAM.
+- **Resiliencia / Fallback:** En caso de baja densidad muestral en un distrito, conmuta a la Zona Homogénea (NSE) y/o degrada elegantemente sin romper el endpoint.
+
+---
+
+#### E. DTOs Java / Spring Boot Completos para Inferencia:
+
+```java
+// 1. Request de Predicción
+public record PrediccionRequestDTO(
+    @JsonProperty("distrito") String distrito,             // ej: "Miraflores"
+    @JsonProperty("superficie") Double superficie,         // ej: 120.0 (m²)
+    @JsonProperty("habitaciones") Integer habitaciones,    // ej: 3
+    @JsonProperty("banios") Double banios,                 // ej: 2.0
+    @JsonProperty("garajes") Integer garajes,              // ej: 1
+    @JsonProperty("piso") Integer piso,                    // ej: 8
+    @JsonProperty("antiguedad") Integer antiguedad,        // ej: 14 (años)
+    @JsonProperty("vista_exterior") Boolean vistaExterior, // true / false
+    @JsonProperty("anio") Integer anio,                    // Opcional (default: año actual)
+    @JsonProperty("trimestre") Integer trimestre           // Opcional (default: trimestre actual)
+) {}
+
+// 2. Response de Predicción
+public record PrediccionResponseDTO(
+    @JsonProperty("distrito") String distrito,
+    @JsonProperty("superficie_m2") Double superficieM2,
+    @JsonProperty("prediccion") ValoresPrediccionDTO prediccion,
+    @JsonProperty("intervalo_confianza") IntervaloConfianzaDTO intervaloConfianza,
+    @JsonProperty("explicabilidad") ExplicabilidadDTO explicabilidad,
+    @JsonProperty("modelo") InfoModeloDTO modelo,
+    @JsonProperty("alerta_contexto") String alertaContexto, // Null si distrito tiene muestra completa; Aviso si es imputado (ENAHO)
+    @JsonProperty("comparables_rntp") List<MuestraComparableDTO> comparablesRntp,
+    @JsonProperty("resumen_rntp") ResumenRNTPDTO resumenRntp
+) {}
+
+public record ValoresPrediccionDTO(
+    @JsonProperty("soles_constantes") Double solesConstantes,
+    @JsonProperty("soles_nominales") Double solesNominales,
+    @JsonProperty("precio_m2_constantes") Double precioM2Constantes,
+    @JsonProperty("precio_m2_nominales") Double precioM2Nominales
+) {}
+
+public record IntervaloConfianzaDTO(
+    @JsonProperty("inferior_nominales") Double inferiorNominales,
+    @JsonProperty("superior_nominales") Double superiorNominales,
+    @JsonProperty("inferior_constantes") Double inferiorConstantes,
+    @JsonProperty("superior_constantes") Double superiorConstantes,
+    @JsonProperty("mape_pct") Double mapePct
+) {}
+
+public record ExplicabilidadDTO(
+    @JsonProperty("valor_base_constantes") Double valorBaseConstantes,
+    @JsonProperty("contribuciones") List<ContribucionFeatureDTO> contribuciones, // Variables ordenadas por impacto SHAP
+    @JsonProperty("n_features_mostradas") Integer nFeaturesMostradas,           // 29 variables mostradas (estrato consolidado)
+    @JsonProperty("n_features_total") Integer nFeaturesTotal,                   // 33 variables totales del modelo
+    @JsonProperty("nota") String nota
+) {}
+
+public record ContribucionFeatureDTO(
+    @JsonProperty("feature") String feature,               // ej: "estrato_socioeconomico", "distrito_encoded"
+    @JsonProperty("label") String label,                   // ej: "Estrato Socioeconómico de la Zona (NSE)"
+    @JsonProperty("shap_value") Double shapValue,          // Escala logarítmica
+    @JsonProperty("valor_feature") Double valorFeature,    // Valor real evaluado
+    @JsonProperty("impacto") String impacto,               // "positivo" | "negativo" | "neutro"
+    @JsonProperty("peso_porcentaje") Double pesoPorcentaje,// % sobre el 100% total (suma exactamente 100.0%)
+    @JsonProperty("nivel_impacto") String nivelImpacto     // "Impacto Muy Alto" | "Impacto Alto" | "Impacto Moderado" | "Impacto Leve"
+) {}
+
+public record InfoModeloDTO(
+    @JsonProperty("version") String version,
+    @JsonProperty("mape_test") Double mapeTest,
+    @JsonProperty("r2_test") Double r2Test,
+    @JsonProperty("ipc_factor") Double ipcFactor,
+    @JsonProperty("periodo_ipc") String periodoIpc,
+    @JsonProperty("train_periodo") String trainPeriodo,
+    @JsonProperty("test_periodo") String testPeriodo
+) {}
+
+// 3. Muestras Comparables Normativas RNTP
+public record MuestraComparableDTO(
+    @JsonProperty("posicion") Integer posicion,
+    @JsonProperty("distrito") String distrito,
+    @JsonProperty("es_mismo_distrito") Boolean esMismoDistrito,
+    @JsonProperty("zona_homogenea") String zonaHomogenea,
+    @JsonProperty("superficie_m2") Double superficieM2,
+    @JsonProperty("habitaciones") Integer habitaciones,
+    @JsonProperty("banios") Double banios,
+    @JsonProperty("garajes") Integer garajes,
+    @JsonProperty("piso") Integer piso,
+    @JsonProperty("antiguedad_anios") Integer antiguedadAnios,
+    @JsonProperty("precio_total_pen") Double precioTotalPen,
+    @JsonProperty("precio_m2_pen") Double precioM2Pen,
+    @JsonProperty("periodo_muestra") String periodoMuestra,
+    @JsonProperty("indice_similitud_pct") Double indiceSimilitudPct,
+    @JsonProperty("diferencias") DiferenciasInmuebleDTO diferencias
+) {}
+
+public record DiferenciasInmuebleDTO(
+    @JsonProperty("dif_superficie_m2") Double difSuperficieM2,
+    @JsonProperty("dif_habitaciones") Integer difHabitaciones,
+    @JsonProperty("dif_banios") Double difBanios,
+    @JsonProperty("dif_antiguedad_anios") Integer difAntiguedadAnios,
+    @JsonProperty("dif_piso") Integer difPiso
+) {}
+
+public record ResumenRNTPDTO(
+    @JsonProperty("cantidad_muestras") Integer cantidadMuestras,
+    @JsonProperty("precio_promedio_pen") Double precioPromedioPen,
+    @JsonProperty("precio_m2_promedio_pen") Double precioM2PromedioPen,
+    @JsonProperty("desviacion_vs_prediccion_pct") Double desviacionVsPrediccionPct,
+    @JsonProperty("cumple_regla_tres_muestras") Boolean cumpleReglaTresMuestras,
+    @JsonProperty("criterio_busqueda") String criterioBusqueda,
+    @JsonProperty("advertencia") String advertencia
+) {}
+```
+
+#### F. Estrategia en Frontend y Backend:
+- **Backend:** Almacena `explicabilidad.contribuciones` (las variables del modelo) en una columna `JSONB` de la tabla `valuaciones` o `predicciones`.
+- **Frontend — Vista Principal:** Renderiza las variables con mayor peso o agrupa en pestañas ejecutivas.
+- **Frontend — Muestras Comparables:** Renderiza la tabla pericial de los 3 testigos homólogos con sus diferencias relativas, dando sustento legal a la tasación.
+
+---
+
+### 7.5. Análisis de Sensibilidad de Macro-Factores (`GET /api/v1/modelos/sensibilidad-factores`)
+
+Diseñado específicamente para la **pantalla principal (Landing Page)** o paneles informativos institucionales. Este endpoint es público y descompone dinámicamente los pesos relativos de los 4 macro-factores del mercado inmobiliario en Lima Metropolitana.
+
+- **Método / Ruta:** `GET /api/v1/modelos/sensibilidad-factores`
+- **Query Params:** `tipo_operacion` (`"venta"` o `"alquiler"`, default: `"venta"`). También admite ruta REST: `GET /api/v1/modelos/sensibilidad-factores/{tipo_operacion}`.
+- **Seguridad:** Público (No requiere `X-Admin-Token`).
+
+#### DTOs Java / Spring Boot:
+
+```java
+public record SensibilidadFactoresResponseDTO(
+    @JsonProperty("modelo") String modelo,
+    @JsonProperty("tipo_operacion") String tipoOperacion,
+    @JsonProperty("version") String version,
+    @JsonProperty("metodo") String metodo,
+    @JsonProperty("periodo_referencia") String periodoReferencia,
+    @JsonProperty("factores_principales") List<FactorSensibilidadDTO> factoresPrincipales,
+    @JsonProperty("cobertura_macro_factores_pct") Double coberturaMacroFactoresPct,
+    @JsonProperty("nota") String nota
+) {}
+
+public record FactorSensibilidadDTO(
+    @JsonProperty("id") String id,                         // ej: "ubicacion_entorno"
+    @JsonProperty("factor") String factor,                 // ej: "Ubicación y Entorno Urbano"
+    @JsonProperty("descripcion") String descripcion,       // Resumen legible
+    @JsonProperty("peso_porcentaje") Double pesoPorcentaje,// ej: 53.1 (suman 100.0%)
+    @JsonProperty("nivel_impacto") String nivelImpacto,    // "Impacto Muy Alto", "Impacto Alto", etc.
+    @JsonProperty("variables_incluidas") List<String> variablesIncluidas
+) {}
+```
+
+---
+
+### 7.6. Micro-Entorno Enriquecido y Contexto Distrital (`GET /api/v1/distritos/{distrito}/contexto`)
+
+Diseñado como **fuente canónica única** tanto para el **mapa interactivo previo a la tasación** como para las **tarjetas de detalle post-tasación**. Calcula métricas objetivas basadas en INEI/ENAHO (estratos socioeconómicos), tasas oficiales de la PNP y distancias geodésicas en metros (Haversine) hacia los hitos urbanos de OpenStreetMap.
+
+- **Método / Ruta:** `GET /api/v1/distritos/{distrito}/contexto`
+- **Query Params (Opcionales):**
+  - `lat` (float): Latitud WGS84 del inmueble.
+  - `lon` (float): Longitud WGS84 del inmueble.
+- **Seguridad:** Pública (No requiere token de administrador).
+- **Comportamiento Híbrido:**
+  - Si se envían `lat` y `lon`: calcula la distancia exacta en metros al hito más cercano y el tiempo de caminata a pie.
+  - Si se omiten: calcula las distancias referenciales a partir del centroide distrital (`es_centroide: true`).
+- **Gobernanza de Muestra Reducida ENAHO:**  
+  En distritos donde la encuesta ENAHO tuvo un tamaño muestral censal reducido (ej. Barranco, Lince, Magdalena), el servicio activa `es_imputado: true` y genera un aviso transparente en `alerta_contexto`.
+
+#### Ejemplo de Respuesta 1 — Distrito con Censo Completo (Miraflores, HTTP 200 OK):
+```json
+{
+  "distrito": "Miraflores",
+  "coordenadas_consultadas": {
+    "lat": -12.1275,
+    "lon": -77.0223,
+    "es_centroide": false
+  },
+  "estrato_socioeconomico": {
+    "titulo": "Estrato Socioeconómico",
+    "clasificacion": "Estrato Medio-Alto",
+    "decil_referencial": "Deciles 6-8 (Estrato Medio-Alto)",
+    "concentracion_estrato_alto_pct": 53.6,
+    "distribucion_estratos": {
+      "alto": 31.6,
+      "medio_alto": 21.9,
+      "medio": 8.1,
+      "medio_bajo": 38.3,
+      "bajo": 0.0
+    },
+    "es_imputado": false,
+    "alerta_contexto": null,
+    "fuente": "INEI / ENAHO 2025"
+  },
+  "seguridad_ciudadana": {
+    "titulo": "Seguridad Ciudadana",
+    "indice": 7.7,
+    "escala": "10.0",
+    "nivel": "Alto",
+    "tasa_robos_10k_hab": 599.24,
+    "tasa_denuncias_10k_hab": 8088.35,
+    "comisaria_cercana": "Comisaría PNP San Antonio",
+    "distancia_comisaria_m": 420,
+    "descripcion": "Baja tasa relativa de delitos patrimoniales. Cobertura de patrullaje y videovigilancia.",
+    "fuente": "Sistema Estadístico de la Policía Nacional del Perú (PNP)"
+  },
+  "movilidad_transporte": {
+    "titulo": "Transporte Público Masivo",
+    "calificacion": "Accesibilidad Vial Óptima",
+    "estacion_cercana": "Estación Benavides",
+    "sistema": "Metropolitano",
+    "distancia_m": 152,
+    "badge_tiempo_a_pie": "2 min a pie",
+    "fuente": "OpenStreetMap / ATU"
+  },
+  "areas_verdes": {
+    "titulo": "Parques y Espacios Públicos",
+    "calificacion": "Áreas verdes a corta distancia (< 300 m)",
+    "parque_cercano": "Parque de las Tradiciones",
+    "tipo_parque": "Parque Urbano",
+    "distancia_m": 0,
+    "badge_tiempo_a_pie": "1 min a pie",
+    "parques_en_radio_1km": 5,
+    "fuente": "OpenStreetMap Cartography"
+  },
+  "salud_educacion": {
+    "titulo": "Equipamiento de Salud y Educación",
+    "hospital_clinica_cercana": "Clínica Delgado Auna",
+    "distancia_salud_m": 1600,
+    "colegio_cercano": "Colegio Carmelitas",
+    "distancia_colegio_m": 310,
+    "universidad_cercana": "Universidad de Piura (Campus Lima - Miraflores)",
+    "distancia_universidad_km": 0.7,
+    "fuente": "OpenStreetMap / MINSA / MINEDU"
+  },
+  "comercio_retail": {
+    "titulo": "Comercio y Servicios",
+    "centro_comercial_cercano": "Paso 28 de Julio",
+    "distancia_comercio_m": 480,
+    "fuente": "OpenStreetMap"
+  }
+}
+```
+
+#### Ejemplo de Respuesta 2 — Distrito con Imputación Censal (Barranco, HTTP 200 OK):
+```json
+{
+  "distrito": "Barranco",
+  "coordenadas_consultadas": {
+    "lat": -12.1489,
+    "lon": -77.0211,
+    "es_centroide": true
+  },
+  "estrato_socioeconomico": {
+    "titulo": "Estrato Socioeconómico",
+    "clasificacion": "Estrato Medio-Alto",
+    "decil_referencial": "Deciles 6-8 (Estrato Medio-Alto)",
+    "concentracion_estrato_alto_pct": 53.6,
+    "distribucion_estratos": {
+      "alto": 31.6,
+      "medio_alto": 21.9,
+      "medio": 8.1,
+      "medio_bajo": 38.3,
+      "bajo": 0.0
+    },
+    "es_imputado": true,
+    "alerta_contexto": "Aviso de contexto: La información de estrato socioeconómico para el distrito de Barranco proviene de una estimación imputada debido a un tamaño muestral censal reducido en ENAHO. La valoración se fundamenta prioritariamente en las características físicas y equipamiento del entorno.",
+    "fuente": "INEI / ENAHO 2025"
+  },
+  "seguridad_ciudadana": {
+    "titulo": "Seguridad Ciudadana",
+    "indice": 6.8,
+    "escala": "10.0",
+    "nivel": "Medio",
+    "tasa_robos_10k_hab": 845.10,
+    "tasa_denuncias_10k_hab": 9120.45,
+    "comisaria_cercana": "Comisaría PNP Barranco",
+    "distancia_comisaria_m": 310,
+    "descripcion": "Zona turística con afluencia peatonal moderada y vigilancia focalizada.",
+    "fuente": "Sistema Estadístico de la Policía Nacional del Perú (PNP)"
+  },
+  "movilidad_transporte": {
+    "titulo": "Transporte Público Masivo",
+    "calificacion": "Accesibilidad Vial Óptima",
+    "estacion_cercana": "Estación Bulevar",
+    "sistema": "Metropolitano",
+    "distancia_m": 220,
+    "badge_tiempo_a_pie": "3 min a pie",
+    "fuente": "OpenStreetMap / ATU"
+  },
+  "areas_verdes": {
+    "titulo": "Parques y Espacios Públicos",
+    "calificacion": "Áreas verdes a corta distancia (< 300 m)",
+    "parque_cercano": "Parque Municipal de Barranco",
+    "tipo_parque": "Parque Histórico",
+    "distancia_m": 80,
+    "badge_tiempo_a_pie": "1 min a pie",
+    "parques_en_radio_1km": 6,
+    "fuente": "OpenStreetMap Cartography"
+  },
+  "salud_educacion": {
+    "titulo": "Equipamiento de Salud y Educación",
+    "hospital_clinica_cercana": "Policlínico Barranco",
+    "distancia_salud_m": 550,
+    "colegio_cercano": "Colegio San Luis",
+    "distancia_colegio_m": 280,
+    "universidad_cercana": "Universidad de Ingeniería y Tecnología (UTEC)",
+    "distancia_universidad_km": 0.8,
+    "fuente": "OpenStreetMap / MINSA / MINEDU"
+  },
+  "comercio_retail": {
+    "titulo": "Comercio y Servicios",
+    "centro_comercial_cercano": "Centro Comercial Barranco Plaza",
+    "distancia_comercio_m": 350,
+    "fuente": "OpenStreetMap"
+  }
+}
+```
+
+#### DTOs Java / Spring Boot para Contexto Distrital:
+
+```java
+public record ContextoDistritalResponseDTO(
+    @JsonProperty("distrito") String distrito,
+    @JsonProperty("coordenadas_consultadas") CoordenadasConsultadasDTO coordenadasConsultadas,
+    @JsonProperty("estrato_socioeconomico") EstratoSocioeconomicoDTO estratoSocioeconomico,
+    @JsonProperty("seguridad_ciudadana") SeguridadCiudadanaDTO seguridadCiudadana,
+    @JsonProperty("movilidad_transporte") MovilidadTransporteDTO movilidadTransporte,
+    @JsonProperty("areas_verdes") AreasVerdesDTO areasVerdes,
+    @JsonProperty("salud_educacion") SaludEducacionDTO saludEducacion,
+    @JsonProperty("comercio_retail") ComercioRetailDTO comercioRetail
+) {}
+
+public record CoordenadasConsultadasDTO(
+    @JsonProperty("lat") Double lat,
+    @JsonProperty("lon") Double lon,
+    @JsonProperty("es_centroide") Boolean esCentroide
+) {}
+
+public record EstratoSocioeconomicoDTO(
+    @JsonProperty("titulo") String titulo,
+    @JsonProperty("clasificacion") String clasificacion,
+    @JsonProperty("decil_referencial") String decilReferencial,
+    @JsonProperty("concentracion_estrato_alto_pct") Double concentracionEstratoAltoPct,
+    @JsonProperty("distribucion_estratos") Map<String, Double> distribucionEstratos,
+    @JsonProperty("es_imputado") Boolean esImputado,
+    @JsonProperty("alerta_contexto") String alertaContexto,
+    @JsonProperty("fuente") String fuente
+) {}
+
+public record SeguridadCiudadanaDTO(
+    @JsonProperty("titulo") String titulo,
+    @JsonProperty("indice") Double indice,
+    @JsonProperty("escala") String escala,
+    @JsonProperty("nivel") String nivel,
+    @JsonProperty("tasa_robos_10k_hab") Double tasaRobos10kHab,
+    @JsonProperty("tasa_denuncias_10k_hab") Double tasaDenuncias10kHab,
+    @JsonProperty("comisaria_cercana") String comisariaCercana,
+    @JsonProperty("distancia_comisaria_m") Integer distanciaComisariaM,
+    @JsonProperty("descripcion") String descripcion,
+    @JsonProperty("fuente") String fuente
+) {}
+
+public record MovilidadTransporteDTO(
+    @JsonProperty("titulo") String titulo,
+    @JsonProperty("calificacion") String calificacion,
+    @JsonProperty("estacion_cercana") String estacionCercana,
+    @JsonProperty("sistema") String sistema,
+    @JsonProperty("distancia_m") Integer distanciaM,
+    @JsonProperty("badge_tiempo_a_pie") String badgeTiempoAPie,
+    @JsonProperty("fuente") String fuente
+) {}
+
+public record AreasVerdesDTO(
+    @JsonProperty("titulo") String titulo,
+    @JsonProperty("calificacion") String calificacion,
+    @JsonProperty("parque_cercano") String parqueCercano,
+    @JsonProperty("tipo_parque") String tipoParque,
+    @JsonProperty("distancia_m") Integer distanciaM,
+    @JsonProperty("badge_tiempo_a_pie") String badgeTiempoAPie,
+    @JsonProperty("parques_en_radio_1km") Integer parquesEnRadio1km,
+    @JsonProperty("fuente") String fuente
+) {}
+
+public record SaludEducacionDTO(
+    @JsonProperty("titulo") String titulo,
+    @JsonProperty("hospital_clinica_cercana") String hospitalClinicaCercana,
+    @JsonProperty("distancia_salud_m") Integer distanciaSaludM,
+    @JsonProperty("colegio_cercano") String colegioCercano,
+    @JsonProperty("distancia_colegio_m") Integer distanciaColegioM,
+    @JsonProperty("universidad_cercana") String universidadCercana,
+    @JsonProperty("distancia_universidad_km") Double distanciaUniversidadKm,
+    @JsonProperty("fuente") String fuente
+) {}
+
+public record ComercioRetailDTO(
+    @JsonProperty("titulo") String titulo,
+    @JsonProperty("centro_comercial_cercano") String centroComercialCercano,
+    @JsonProperty("distancia_comercio_m") Integer distanciaComercioM,
+    @JsonProperty("fuente") String fuente
+) {}
+```
